@@ -14,6 +14,7 @@ Ollama and LM Studio. One Node.js process, no npm dependencies, served on 127.0.
 
 | Path | What it does |
 |---|---|
+| `db.mjs` | Opens SQLite safely: permissions, WAL and safe pragmas, integrity check, `MIGRATIONS` (versioned with `user_version`), the read-only connection `rdb`, daily backup and retention |
 | `alerts.mjs` | Alert rules (held for a minute, cooldown, resolve), the `events` table, the optional webhook (Discord / ntfy / Slack / JSON) |
 | `server.mjs` | Everything server-side in one file, in this order: config (`.env`), child samplers (`stream()`), nvidia-smi, CPU sampler via `platform/`, LibreHardwareMonitor / native sensors, engine polling, the per-minute bucket and SQLite writes, queries (series, heatmap, summary, report, efficiency, share, CSV), setup info (engines, pi, scheduled tasks), HTTP with all security checks, crash handling |
 | `platform/windows.mjs`, `platform/linux.mjs` | All OS differences: CPU / RAM / disk sampling, sensors, OS name, scheduled tasks, the power-limit command. `server.mjs` imports one of them at start |
@@ -41,8 +42,11 @@ Ollama and LM Studio. One Node.js process, no npm dependencies, served on 127.0.
    a minute resumes that minute's rows (`resumeBucket`). `dt` is capped at 10 s, so a sleeping PC
    does not count as running.
 
-Tables: `m` (whole PC per minute), `mm` (per model per minute), `runs`. Columns that came later are
-added by the migration list next to `M_COLS`; never change or drop a column, add new ones there.
+Tables: `m` (whole PC per minute), `mm` (per model per minute), `runs`, `events` (alerts),
+`requests` (llama.cpp per request). Schema changes go into `MIGRATIONS` in `db.mjs` as a new entry
+(never edit an old one, never drop or change a column). Writes use `db` (the server only);
+everything the page asks for goes through `rdb`, which is read-only twice over (open flag and
+`query_only`). Keep it that way when adding a query.
 
 ## Rules that must not be broken
 
@@ -55,6 +59,8 @@ added by the migration list next to `M_COLS`; never change or drop a column, add
   names, ranges and periods come from fixed lists; user input is only ever a bound parameter.
 - `hostAllowed()` (DNS rebinding) and `tokenOk()` (`DASH_TOKEN`, constant-time compare) run before
   anything else. Keep the security headers and the CSP (`script-src 'self'`, no inline script).
+- `data/` and `.env` stay private to the user (0700 / 0600, or the ACL from install.ps1); the
+  database is never served, and its backups live in `data/backup/` with the same protection.
 - Nothing private reaches the page or the database: `argPairs()` masks secret-looking flags and
   cuts paths to file names on any OS (`baseName()`, not `path.basename`, which keeps Windows paths
   whole on Linux); model ids must not contain folders; pi's `auth.json` and API keys are never read;

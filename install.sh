@@ -45,7 +45,9 @@ fi
 say "Node.js $("$NODE" --version)  OK ($NODE)"
 
 # --- .env ---
-if [ ! -f "$DIR/.env" ]; then cp "$DIR/.env.example" "$DIR/.env"; chmod 600 "$DIR/.env"; say "Created .env from .env.example"; fi
+if [ ! -f "$DIR/.env" ]; then cp "$DIR/.env.example" "$DIR/.env"; say "Created .env from .env.example"; fi
+# Settings (tokens, API keys, webhook URL) and history: readable by you only.
+chmod 600 "$DIR/.env"; mkdir -p "$DIR/data"; chmod 700 "$DIR/data"
 PORT=$(setting DASH_PORT); PORT=${PORT:-8091}
 case "$PORT" in ''|*[!0-9]*) say "DASH_PORT in .env is not a number"; exit 1 ;; esac
 

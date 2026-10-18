@@ -328,6 +328,12 @@ WattLlama is a read-only monitor that runs as your user.
   only, same-origin with a custom header (blocks CSRF), range-checked, confirmed in the OS's own prompt.
 - Crash-safe: an unexpected error is logged and the process restarts; it never touches drivers,
   clocks, fans or voltages.
+- **The database** (`data/power.db`, SQLite) holds numbers and model names only, never prompts or
+  text. `data/` and `.env` are readable by you only (Linux 0700 / 0600; on Windows the installer
+  sets an ACL for you, SYSTEM and Administrators). The page reads through a separate **read-only**
+  connection, so no request can change or delete data. WAL journal (crash-safe), an integrity check at
+  start (a damaged file is moved aside, never overwritten), versioned migrations in one transaction,
+  a **daily backup** in `data/backup/` (last 7 kept), alerts kept 365 days and per-request details 90.
 - CI runs the HTTP security rules as tests on every change, on Windows and Linux, and fails if the
   RAPL helper's systemd hardening ever gets weaker.
 

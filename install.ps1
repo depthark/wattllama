@@ -33,6 +33,15 @@ if (-not (Test-Path $envFile)) {
     Copy-Item (Join-Path $Dir '.env.example') $envFile
     Write-Host 'Created .env from .env.example'
 }
+# History and settings (tokens, API keys, webhook URL) readable by you only, plus SYSTEM and
+# Administrators. SIDs, not names, so this works in any Windows language.
+$me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$dataDir = Join-Path $Dir 'data'
+New-Item -ItemType Directory -Force $dataDir | Out-Null
+& icacls $dataDir /inheritance:r /grant:r "*${me}:(OI)(CI)F" '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+& icacls $envFile /inheritance:r /grant:r "*${me}:F" '*S-1-5-18:F' '*S-1-5-32-544:F' | Out-Null
+Write-Host 'data\ and .env: readable by you only'
+
 $port = 8091
 $m = Select-String -Path $envFile -Pattern '^\s*DASH_PORT\s*=\s*(\d+)' | Select-Object -Last 1
 if ($m) { $port = [int]$m.Matches[0].Groups[1].Value }

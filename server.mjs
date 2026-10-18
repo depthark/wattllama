@@ -18,6 +18,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ENGINES } from "./engines/index.mjs";
 import { createAlerts } from "./alerts.mjs";
+import { openDatabase } from "./db.mjs";
 // Everything that differs between Windows and Linux lives in platform/.
 const PLATFORM = await import(process.platform === "win32" ? "./platform/windows.mjs" : "./platform/linux.mjs");
 
@@ -286,33 +287,19 @@ async function pollLLM() {
 // --demo: a separate database pre-filled with 14 days of made-up history, so the page can
 // be tried (and screenshotted) right away. Live numbers are still real.
 const DEMO = process.argv.includes("--demo");
-fs.mkdirSync(CFG.dataDir, { recursive: true });
-const db = new DatabaseSync(DEMO ? ":memory:" : path.join(CFG.dataDir, "power.db"));
-// m: the whole PC per minute (active_s / gen_tok = any model).
-db.exec(`CREATE TABLE IF NOT EXISTS m (
-  ts INTEGER PRIMARY KEY, secs REAL, gpu_w REAL, cpu_w REAL, dram_w REAL, sys_w REAL,
-  gpu_t REAL, gpu_tmax REAL, gpu_util REAL, cpu_util REAL, vram REAL,
-  active_s REAL, wh REAL, wh_active REAL, wh_gpu REAL, gen_tok INTEGER, pp_tok INTEGER)`);
-// mm: each model per minute. wh = whole-PC energy while that model was busy.
-db.exec(`CREATE TABLE IF NOT EXISTS mm (
-  ts INTEGER, model TEXT, active_s REAL, wh REAL, gen_tok INTEGER, pp_tok INTEGER, req INTEGER DEFAULT 0, PRIMARY KEY (ts, model))`);
-// runs: one row per generation run of a model, from its first busy poll until 15 s
-// without generating, so an agent's short pauses between tool calls stay one run.
-db.exec(`CREATE TABLE IF NOT EXISTS runs (
-  start INTEGER, end INTEGER, model TEXT, active_s REAL, wh REAL, gen_tok INTEGER, pp_tok INTEGER, req INTEGER DEFAULT 0, PRIMARY KEY (start, model))`);
-// Databases from older versions: add the columns that came later.
-// m extras: CPU temperature (LibreHardwareMonitor, null without it), GPU power limit,
-// GPU fan %, effective CPU clock, RAM in use (MB).
+// db: the writer (this process only). rdb: read-only, for everything the page asks.
+// Permissions, WAL, integrity check, migrations, backups: see db.mjs.
+const { db, rdb, maintenance } = openDatabase({ dir: CFG.dataDir, demo: DEMO, log });
+// m columns in INSERT order (the later ones come from migrations): CPU temperature (null
+// without a sensor), GPU power limit, GPU fan %, effective CPU clock, RAM in use (MB).
 const M_COLS = ["ts", "secs", "gpu_w", "cpu_w", "dram_w", "sys_w", "gpu_t", "gpu_tmax", "gpu_util", "cpu_util", "vram",
   "active_s", "wh", "wh_active", "wh_gpu", "gen_tok", "pp_tok", "cpu_t", "cpu_tmax", "gpu_pl", "gpu_fan", "cpu_mhz", "ram_used"];
-for (const [table, col, def] of [["mm", "req", "INTEGER DEFAULT 0"], ["runs", "req", "INTEGER DEFAULT 0"],
-  ["m", "cpu_t", "REAL"], ["m", "cpu_tmax", "REAL"], ["m", "gpu_pl", "REAL"], ["m", "gpu_fan", "REAL"], ["m", "cpu_mhz", "REAL"], ["m", "ram_used", "REAL"]]) {
-  if (!db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
-}
+setTimeout(maintenance, 5 * 60_000);            // first backup a few minutes after start, then every 6 h
+setInterval(maintenance, 6 * 3600_000);
 const upsert = db.prepare(`INSERT OR REPLACE INTO m (${M_COLS.join(",")}) VALUES (${M_COLS.map(() => "?").join(",")})`);
 const upsertMM = db.prepare(`INSERT OR REPLACE INTO mm VALUES (?,?,?,?,?,?,?)`);
 const insertRun = db.prepare(`INSERT OR REPLACE INTO runs VALUES (?,?,?,?,?,?,?,?)`);
-const alerts = createAlerts({ env: process.env, db, log });
+const alerts = createAlerts({ env: process.env, db, readDb: rdb, log });
 let todayWh = { t: 0, wh: 0 };      // today's energy for the budget alerts, re-read once a minute
 const openRuns = new Map();
 const RUN_GAP_MS = 15_000;
@@ -464,7 +451,7 @@ function series(range) {
   if (!RANGES[range]) range = "24h";
   const [span, step] = RANGES[range];
   const from = Date.now() - span * 1000, stepMs = step * 1000;
-  const rows = db.prepare(`SELECT (ts / ${stepMs}) * ${stepMs} AS t, SUM(secs) s,
+  const rows = rdb.prepare(`SELECT (ts / ${stepMs}) * ${stepMs} AS t, SUM(secs) s,
       SUM(gpu_w*secs)/SUM(secs) gpu, SUM((cpu_w+dram_w)*secs)/SUM(secs) cpu, SUM(sys_w*secs)/SUM(secs) sys,
       MAX(gpu_tmax) tmax, SUM(gpu_t*secs)/SUM(secs) tavg, SUM(active_s) act,
       MAX(cpu_tmax) ctmax, AVG(cpu_t) ctavg, AVG(gpu_pl) pl, AVG(gpu_fan) fan, AVG(cpu_mhz) mhz, MAX(ram_used) ram,
@@ -479,8 +466,8 @@ function heatmap(days, model) {
   days = Math.min(Math.max(Number(days) || 7, 1), 90);
   const start = new Date(); start.setHours(0, 0, 0, 0); start.setDate(start.getDate() - (days - 1));
   const rows = model
-    ? db.prepare("SELECT ts, gen_tok, wh AS wh_active, active_s, 0 AS wh FROM mm WHERE ts >= ? AND model = ?").all(start.getTime(), model)
-    : db.prepare("SELECT ts, gen_tok, wh, wh_active, active_s FROM m WHERE ts >= ?").all(start.getTime());
+    ? rdb.prepare("SELECT ts, gen_tok, wh AS wh_active, active_s, 0 AS wh FROM mm WHERE ts >= ? AND model = ?").all(start.getTime(), model)
+    : rdb.prepare("SELECT ts, gen_tok, wh, wh_active, active_s FROM m WHERE ts >= ?").all(start.getTime());
   const key = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   const map = new Map();
   for (let i = 0; i < days; i++) {
@@ -497,20 +484,20 @@ function heatmap(days, model) {
 
 // Idle baseline: 20th percentile of whole minutes with no generation, last 7 days.
 function idleBaseline() {
-  const v = db.prepare(`SELECT sys_w FROM m WHERE ts >= ? AND active_s = 0 AND secs >= 50 ORDER BY sys_w`)
+  const v = rdb.prepare(`SELECT sys_w FROM m WHERE ts >= ? AND active_s = 0 AND secs >= 50 ORDER BY sys_w`)
     .all(Date.now() - 7 * 86400_000).map((r) => r.sys_w);
   return v.length >= 5 ? v[Math.floor(v.length * 0.2)] : null;
 }
 
 function period(from, to = Date.now() + 60_000) {
-  return db.prepare(`SELECT COALESCE(SUM(secs),0) secs, COALESCE(SUM(wh),0) wh, COALESCE(SUM(wh_active),0) wha,
+  return rdb.prepare(`SELECT COALESCE(SUM(secs),0) secs, COALESCE(SUM(wh),0) wh, COALESCE(SUM(wh_active),0) wha,
       COALESCE(SUM(active_s),0) act, COALESCE(SUM(gen_tok),0) gen, COALESCE(SUM(pp_tok),0) pp
     FROM m WHERE ts >= ? AND ts < ?`).get(from, to);
 }
 
 // Per model: tokens, busy time and whole-PC energy while it was busy.
 function perModel(from, to = Date.now() + 60_000) {
-  return db.prepare(`SELECT model, SUM(active_s) act, SUM(wh) wh, SUM(gen_tok) gen, SUM(pp_tok) pp, SUM(req) req
+  return rdb.prepare(`SELECT model, SUM(active_s) act, SUM(wh) wh, SUM(gen_tok) gen, SUM(pp_tok) pp, SUM(req) req
     FROM mm WHERE ts >= ? AND ts < ? GROUP BY model ORDER BY SUM(active_s) DESC`).all(from, to);
 }
 
@@ -532,7 +519,7 @@ function reportRange(p) {
 function report(p) {
   if (!REPORT_PERIODS.includes(p)) p = "this-month";
   const [from, to] = reportRange(p);
-  const days = db.prepare(`SELECT date(ts / 1000, 'unixepoch', 'localtime') day, SUM(secs) secs, SUM(wh) wh, SUM(wh_active) wha,
+  const days = rdb.prepare(`SELECT date(ts / 1000, 'unixepoch', 'localtime') day, SUM(secs) secs, SUM(wh) wh, SUM(wh_active) wha,
       SUM(active_s) act, SUM(gen_tok) gen, SUM(pp_tok) pp, MAX(gpu_tmax) gpu_tmax, MAX(cpu_tmax) cpu_tmax
     FROM m WHERE ts >= ? AND ts < ? GROUP BY day ORDER BY day`).all(from, to);
   return { period: p, from, to: Math.min(to, Date.now()), price: CFG.price, currency: CFG.currency,
@@ -565,7 +552,7 @@ function summary() {
   return {
     models: { today: perModel(today), week: perModel(Date.now() - 7 * 86400_000), all: perModel(0) },
     restW: CFG.restW, psuEff: CFG.psuEff, idleW: idleBaseline(), price: CFG.price, currency: CFG.currency,
-    first: db.prepare("SELECT MIN(ts) t FROM m").get().t,
+    first: rdb.prepare("SELECT MIN(ts) t FROM m").get().t,
     today: period(today), yesterday: period(today - 86400_000, today),
     week: period(Date.now() - 7 * 86400_000),
     month: period(new Date(d.getFullYear(), d.getMonth(), 1).getTime()), all: period(0),
@@ -596,7 +583,7 @@ function liveView() {
 // Energy efficiency per GPU power limit: the "same speed for 100 W less" check.
 // Minutes in which something was generated, grouped by the limit in force (5 W steps).
 function efficiency() {
-  return db.prepare(`SELECT CAST(ROUND(gpu_pl / 5.0) * 5 AS INTEGER) pl, SUM(gen_tok) gen, SUM(active_s) act,
+  return rdb.prepare(`SELECT CAST(ROUND(gpu_pl / 5.0) * 5 AS INTEGER) pl, SUM(gen_tok) gen, SUM(active_s) act,
       SUM(wh_active) wh, SUM(gpu_w * active_s) / SUM(active_s) gpuw, COUNT(*) minutes
     FROM m WHERE gen_tok > 0 AND active_s > 0 AND gpu_pl IS NOT NULL GROUP BY pl ORDER BY pl DESC`).all();
 }
@@ -670,7 +657,7 @@ const engineOf = new Map();          // model -> engine name, learnt while it is
 function share() {
   for (const m of live.llm.models || []) engineOf.set(m.id, m.engine);
   const gpus = [...live.gpus.values(), ...live.lhmGpus].map((g) => g.name);
-  const models = db.prepare(`SELECT mm.model, SUM(mm.gen_tok) gen, SUM(mm.active_s) act, SUM(mm.wh) wh,
+  const models = rdb.prepare(`SELECT mm.model, SUM(mm.gen_tok) gen, SUM(mm.active_s) act, SUM(mm.wh) wh,
       SUM(m.gpu_pl * mm.active_s) / NULLIF(SUM(CASE WHEN m.gpu_pl IS NULL THEN 0 ELSE mm.active_s END), 0) pl
     FROM mm LEFT JOIN m ON m.ts = mm.ts WHERE mm.gen_tok > 0 GROUP BY mm.model HAVING SUM(mm.gen_tok) >= 1000 ORDER BY gen DESC`).all()
     .map((r) => ({ model: r.model, engine: engineOf.get(r.model) || "",
@@ -691,14 +678,14 @@ function exportCSV(res, sendHeaders, what, range) {
   const [table, tcol] = EXPORTS[what] || EXPORTS.minutes;
   const span = EXPORT_RANGES[range] === undefined ? EXPORT_RANGES["30d"] : EXPORT_RANGES[range];
   const from = span == null ? 0 : Date.now() - span * 1000;
-  const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+  const cols = rdb.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
   const cell = (v) => v == null ? "" : typeof v === "number" ? (Number.isInteger(v) ? String(v) : String(+v.toFixed(4)))
     : /[",\r\n]/.test(v) || /^[=+\-@]/.test(v) ? `"${String(v).replace(/^([=+\-@])/, "'$1").replace(/"/g, '""')}"` : v;   // no spreadsheet formulas
   sendHeaders({ "content-type": "text/csv; charset=utf-8",
     "content-disposition": `attachment; filename="wattllama-${what in EXPORTS ? what : "minutes"}-${range in EXPORT_RANGES ? range : "30d"}.csv"` });
   res.write(["time", ...cols].join(",") + "\n");
   let chunk = "";
-  for (const r of db.prepare(`SELECT * FROM ${table} WHERE ${tcol} >= ? ORDER BY ${tcol}`).iterate(from)) {
+  for (const r of rdb.prepare(`SELECT * FROM ${table} WHERE ${tcol} >= ? ORDER BY ${tcol}`).iterate(from)) {
     chunk += [new Date(r[tcol]).toISOString(), ...cols.map((c) => cell(r[c]))].join(",") + "\n";
     if (chunk.length > 64 << 10) { res.write(chunk); chunk = ""; }
   }
@@ -706,7 +693,7 @@ function exportCSV(res, sendHeaders, what, range) {
 }
 
 function runs(limit = 40) {
-  const rows = db.prepare("SELECT * FROM runs ORDER BY start DESC LIMIT ?").all(limit);
+  const rows = rdb.prepare("SELECT * FROM runs ORDER BY start DESC LIMIT ?").all(limit);
   for (const [model, r] of openRuns) rows.unshift({ start: r.start, end: r.last, model, active_s: r.active,
     wh: r.wh, gen_tok: r.gen, pp_tok: r.pp, req: r.req, open: true });
   return rows;

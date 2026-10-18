@@ -46,7 +46,7 @@ export function webhookRequest(hook, ev) {
   return { headers: { "content-type": "application/json" }, body: JSON.stringify({ source: "wattllama", kind: ev.kind, level: ev.level, title: ev.title, message: ev.message, time: new Date(ev.ts).toISOString() }) };
 }
 
-export function createAlerts({ env, db, log, fetchImpl = fetch, now = () => Date.now() }) {
+export function createAlerts({ env, db, readDb = db, log, fetchImpl = fetch, now = () => Date.now() }) {
   const cfg = {
     gpuTemp: numOr(env.DASH_ALERT_GPU_TEMP, 83), cpuTemp: numOr(env.DASH_ALERT_CPU_TEMP, 90),
     vramPct: numOr(env.DASH_ALERT_VRAM_PCT, 99), busyMin: numOr(env.DASH_ALERT_BUSY_MIN, 60),
@@ -155,7 +155,7 @@ export function createAlerts({ env, db, log, fetchImpl = fetch, now = () => Date
     daily.add(r.key.replace(/^daily-/, ""));         // "daily-kwh:2026-10-18" -> "kwh:2026-10-18"
   }
 
-  const list = (limit = 50) => db.prepare("SELECT ts, kind, level, title, message, sent FROM events ORDER BY ts DESC LIMIT ?").all(Math.min(Math.max(limit, 1), 500));
+  const list = (limit = 50) => readDb.prepare("SELECT ts, kind, level, title, message, sent FROM events ORDER BY ts DESC LIMIT ?").all(Math.min(Math.max(limit, 1), 500));
   const active = () => [...firing.values()].map((f) => ({ since: f.ts, title: f.title, kind: f.kind }));
   const settings = () => ({ enabled: cfg.enabled, gpuTemp: cfg.gpuTemp, cpuTemp: cfg.cpuTemp, vramPct: cfg.vramPct, busyMin: cfg.busyMin,
     dailyKwh: cfg.dailyKwh, dailyCost: cfg.dailyCost, throttle: cfg.throttle, engineDown: cfg.engineDown,
