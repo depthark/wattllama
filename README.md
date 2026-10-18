@@ -53,6 +53,7 @@ so every client that talks to it is counted.
 | 📋 **Runs** | One row per generation run: model, duration, requests, tokens, tok/s, Wh, Wh per 1k tokens |
 | 🏆 **Community results** | Turn your numbers into a prefilled GitHub issue for [RESULTS.md](RESULTS.md); you see exactly what is shared |
 | ⚙️ **Setup at a glance** | The real arguments each model runs with (secrets masked), [pi](https://github.com/badlogic/pi-mono) agent settings if you use it, chosen Windows scheduled tasks with last/next run |
+| 🔔 **Alerts** | GPU / CPU too hot, GPU throttling, VRAM full, an engine stopped, a model stuck generating, daily kWh or cost budget: on the page, as browser notifications, and optionally on your phone (Discord, ntfy, Slack, any webhook) |
 | 🧾 **Reports** | This month, last month, last 7 / 30 days, this or last year: per day and per model, as CSV or print / PDF |
 | 💶 **Cost (optional)** | Set your price per kWh and currency to see money next to every kWh; off by default |
 | 📤 **CSV export** | Minutes, per-model minutes and runs, for your own spreadsheets |
@@ -186,6 +187,27 @@ see [CONTRIBUTING.md](CONTRIBUTING.md#adding-an-engine).
 
 </details>
 
+### Alerts
+
+On by default with sensible limits, shown on the page; change or turn off each rule in `.env`:
+
+| Alert | Default | |
+|---|---|---|
+| GPU / CPU temperature | 83 °C / 90 °C for a minute | critical 7 °C above |
+| GPU throttling | on | heat or hardware slowdown for a minute, not the normal power cap |
+| VRAM full | 99 % for a minute | past that, models spill into system RAM and slow down a lot |
+| Engine stopped | on | an engine that was running does not answer for 2 minutes; "back to normal" when it returns |
+| Busy too long | 60 min | one model generating without a pause: a runaway generation or a stuck agent |
+| Daily budget | off | `DASH_ALERT_DAILY_KWH` / `DASH_ALERT_DAILY_COST` |
+
+**Browser notifications:** click *Enable browser notifications* in the Alerts section; they work while
+the page is open in a tab (on 127.0.0.1; browsers allow them only on secure origins).
+
+**On your phone:** set `DASH_ALERT_WEBHOOK` to a [Discord webhook](https://support.discord.com/hc/en-us/articles/228383668),
+an [ntfy](https://ntfy.sh) topic URL (pick a long random topic name and subscribe in the ntfy app), a
+Slack webhook or any URL that accepts JSON, restart, and run `node server.mjs --test-alert`. Messages
+contain numbers and model names only, at most 20 an hour.
+
 ### Phone / other devices
 
 ```powershell
@@ -299,7 +321,9 @@ WattLlama is a read-only monitor that runs as your user.
   you visit cannot read the dashboard through your browser.
 - Never shows secrets: `--api-key` and similar arguments are masked, file paths are shortened to
   file names, pi's `auth.json` and API keys are never read, prompts and replies are never stored.
-- Nothing is sent anywhere. *Share your result* only opens a GitHub page with what you saw.
+- Nothing is sent anywhere, with one opt-in exception: alerts go to `DASH_ALERT_WEBHOOK` if you set
+  it (https only, numbers and model names only, the URL never shown or logged, at most 20 an hour,
+  no redirects followed). *Share your result* only opens a GitHub page with what you saw.
 - The single optional write action (GPU power limit) is described above: off by default, local
   only, same-origin with a custom header (blocks CSRF), range-checked, confirmed in the OS's own prompt.
 - Crash-safe: an unexpected error is logged and the process restarts; it never touches drivers,
@@ -325,6 +349,7 @@ Everything lives in `.env` (see [.env.example](.env.example)); all settings are 
 | `DASH_OLLAMA_JOURNAL` / `DASH_OLLAMA_UNIT` | `1` / `ollama` | Linux: read the service's journal (`0` = off) |
 | `DASH_LMSTUDIO_URL` | `http://127.0.0.1:1234` | empty = off |
 | `DASH_LMSTUDIO_API_KEY` / `DASH_LMSTUDIO_LMS` | – / found | if the server requires a token / path to `lms` |
+| `DASH_ALERTS`, `DASH_ALERT_*` | on, see [Alerts](#alerts) | alert rules; `DASH_ALERT_WEBHOOK` sends them to your phone |
 | `DASH_PRICE_PER_KWH` / `DASH_CURRENCY` | – | optional cost: all-in price per kWh from your bill, e.g. `0.30` / `EUR` |
 | `DASH_REST_W` / `DASH_PSU_EFF` | `35` / `0.88` | the estimated part |
 | `DASH_CPU_MAX_W` | `65` | only used without RAPL counters |

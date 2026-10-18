@@ -17,6 +17,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ENGINES } from "./engines/index.mjs";
+import { createAlerts } from "./alerts.mjs";
 // Everything that differs between Windows and Linux lives in platform/.
 const PLATFORM = await import(process.platform === "win32" ? "./platform/windows.mjs" : "./platform/linux.mjs");
 
@@ -29,6 +30,16 @@ const { DatabaseSync } = await import("node:sqlite");
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 loadEnv(path.join(DIR, ".env"));
+
+// node server.mjs --test-alert: send one test message to DASH_ALERT_WEBHOOK and exit.
+if (process.argv.includes("--test-alert")) {
+  const a = createAlerts({ env: process.env, db: new DatabaseSync(":memory:"), log: (...m) => console.log(...m) });
+  const s = a.settings();
+  if (!s.webhook || s.webhook === "invalid") { console.log("DASH_ALERT_WEBHOOK is not set or not valid (see .env.example)."); process.exit(1); }
+  const ok = await a.test();
+  console.log(ok ? `Test alert sent (${s.webhook}).` : "Test alert failed, see above.");
+  process.exit(ok ? 0 : 1);
+}
 
 const CFG = {
   host: process.env.DASH_HOST || "127.0.0.1",
@@ -301,6 +312,8 @@ for (const [table, col, def] of [["mm", "req", "INTEGER DEFAULT 0"], ["runs", "r
 const upsert = db.prepare(`INSERT OR REPLACE INTO m (${M_COLS.join(",")}) VALUES (${M_COLS.map(() => "?").join(",")})`);
 const upsertMM = db.prepare(`INSERT OR REPLACE INTO mm VALUES (?,?,?,?,?,?,?)`);
 const insertRun = db.prepare(`INSERT OR REPLACE INTO runs VALUES (?,?,?,?,?,?,?,?)`);
+const alerts = createAlerts({ env: process.env, db, log });
+let todayWh = { t: 0, wh: 0 };      // today's energy for the budget alerts, re-read once a minute
 const openRuns = new Map();
 const RUN_GAP_MS = 15_000;
 
@@ -434,6 +447,10 @@ async function tick() {
     if (r) { r.gen += p.gen; r.pp += p.pp; r.req += p.req; }
   }
   pending.clear();
+
+  if (now - todayWh.t > 60_000) { const d = new Date(); d.setHours(0, 0, 0, 0); todayWh = { t: now, wh: period(d.getTime()).wh }; }
+  alerts.check({ gpus: [...live.gpus.values(), ...live.lhmGpus].filter((x) => now - x.t < 15_000), cpuTemp: cpuT,
+    engines: live.llm.engines, models: live.llm.models, todayWh: todayWh.wh, price: CFG.price, currency: CFG.currency });
 }
 
 setInterval(() => { tick().catch((e) => log("tick", e.message)); }, CFG.intervalMs);
@@ -572,6 +589,7 @@ function liveView() {
     platform: PLATFORM.name,
     control: CONTROL,
     llm: engines.length ? live.llm : null,
+    alerts: alerts.active(),
   };
 }
 
@@ -812,6 +830,7 @@ const httpServer = http.createServer(async (req, res) => {
     if (u.pathname === "/api/heatmap") return json(heatmap(u.searchParams.get("days"), u.searchParams.get("model")));
     if (u.pathname === "/api/setup") return json(await setup());
     if (u.pathname === "/api/efficiency") return json(efficiency());
+    if (u.pathname === "/api/alerts") return json({ active: alerts.active(), events: alerts.list(100), settings: alerts.settings() });
     if (u.pathname === "/api/share") return json(share());
     if (u.pathname === "/api/report") return json(report(u.searchParams.get("period")));
     if (u.pathname === "/api/report.csv") {

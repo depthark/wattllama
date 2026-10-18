@@ -38,7 +38,8 @@ test("server: security rules, endpoints, AMD GPU via LibreHardwareMonitor", { ti
   const env = { ...process.env, DASH_PORT: "0",   // the OS picks a free port; the server logs it (no race with parallel tests)
     DASH_HOST: "127.0.0.1", DASH_DATA_DIR: dataDir, DASH_LHM_URL: lhm.url,
     DASH_LLAMA_URL: "", DASH_OLLAMA_URL: "", DASH_LMSTUDIO_URL: "", DASH_TOKEN: "", DASH_TASKS: "", DASH_ALLOW_POWER_LIMIT: "0",
-    DASH_PRICE_PER_KWH: "6,5", DASH_CURRENCY: "CZK" };
+    DASH_PRICE_PER_KWH: "6,5", DASH_CURRENCY: "CZK",
+    DASH_ALERT_WEBHOOK: "http://127.0.0.1:9/hook-SECRET-topic" };     // local and unreachable: no traffic leaves the test
   const srv = spawn(process.execPath, ["--no-warnings", path.join(ROOT, "server.mjs"), "--demo"], { env, stdio: ["ignore", "pipe", "pipe"] });
   let out = ""; srv.stdout.on("data", (d) => out += d); srv.stderr.on("data", (d) => out += d);
   try {
@@ -76,6 +77,14 @@ test("server: security rules, endpoints, AMD GPU via LibreHardwareMonitor", { ti
     const lines = csv.body.split(/\n/);
     assert.match(lines[0], /^time,start,end,model,/);
     assert.ok(lines.length > 10, "demo runs exported");
+    const al = JSON.parse((await request(port, { path: "/api/alerts" })).body);
+    assert.equal(al.settings.webhook, "json");
+    assert.ok(Array.isArray(al.events) && Array.isArray(al.active));
+    for (const p of ["/api/alerts", "/api/live", "/api/setup", "/api/summary", "/api/share"]) {
+      assert.ok(!(await request(port, { path: p })).body.includes("SECRET"), `${p} must not reveal the webhook URL`);
+    }
+    assert.ok(!out.includes("SECRET"), "the log must not contain the webhook URL either");
+
     const rep = JSON.parse((await request(port, { path: "/api/report?period=30d" })).body);
     assert.equal(rep.price, 6.5, "comma decimal accepted");
     assert.equal(rep.currency, "CZK");

@@ -14,6 +14,7 @@ Ollama and LM Studio. One Node.js process, no npm dependencies, served on 127.0.
 
 | Path | What it does |
 |---|---|
+| `alerts.mjs` | Alert rules (held for a minute, cooldown, resolve), the `events` table, the optional webhook (Discord / ntfy / Slack / JSON) |
 | `server.mjs` | Everything server-side in one file, in this order: config (`.env`), child samplers (`stream()`), nvidia-smi, CPU sampler via `platform/`, LibreHardwareMonitor / native sensors, engine polling, the per-minute bucket and SQLite writes, queries (series, heatmap, summary, report, efficiency, share, CSV), setup info (engines, pi, scheduled tasks), HTTP with all security checks, crash handling |
 | `platform/windows.mjs`, `platform/linux.mjs` | All OS differences: CPU / RAM / disk sampling, sensors, OS name, scheduled tasks, the power-limit command. `server.mjs` imports one of them at start |
 | `sampler.ps1`, `tasks.ps1` | Windows helpers: one long-running PowerShell process reading PDH counters (English counter names, so any display language works); Task Scheduler listing on demand |
@@ -61,7 +62,10 @@ added by the migration list next to `M_COLS`; never change or drop a column, add
   or logged. Every value from an engine or a sensor goes through `esc()` before it becomes HTML.
 - Nothing runs as admin or root. The Linux RAPL helper is the only root part and must stay a
   minimal script under the locked-down unit; CI fails if `systemd-analyze security` exceeds 1.5.
-- Nothing is sent anywhere. *Share your result* only builds a GitHub URL the user opens.
+- Nothing is sent anywhere, except alerts to `DASH_ALERT_WEBHOOK` when the user sets one: https (or
+  http to a private address), no redirects, 5 s timeout, at most 20 an hour, numbers and model names
+  only, Discord mentions disabled. The URL is a secret: `settings()` exposes only its format, logs
+  only the host. *Share your result* only builds a GitHub URL the user opens.
 
 **Performance.** It is a monitor: generation speed must not change (measured: 54–60 tok/s with
 and without it on the author's PC).

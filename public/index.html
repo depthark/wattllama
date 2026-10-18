@@ -14,6 +14,8 @@
     <div class="hd"><div class="status" id="status">loading…</div><button class="theme" id="theme" title="Theme">auto</button></div>
   </header>
 
+  <div id="alertBar" class="alertbar" hidden></div>
+
   <section class="grid">
     <div class="card"><h3>Now</h3>
       <div class="big" id="nowW">–</div>
@@ -77,6 +79,15 @@
 
   <h2 class="sec">Hardware</h2>
   <div class="grid" id="hw"></div>
+
+  <h2 class="sec">Alerts</h2>
+  <div class="card" style="margin-bottom:14px">
+    <div class="hd" style="justify-content:space-between;margin-bottom:8px">
+      <div class="chips" id="alertRules"></div>
+      <div class="hd"><button class="theme" id="notifyBtn" hidden>Browser notifications: off</button></div>
+    </div>
+    <div class="scroll"><table id="alertEvents"></table></div>
+  </div>
 
   <h2 class="sec">Efficiency by GPU power limit</h2>
   <div class="card scroll"><table id="eff"></table></div>

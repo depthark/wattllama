@@ -39,6 +39,9 @@ async function refreshLive() {
           ? `<b><span class="dot run"></span>${esc(short(x.id))} · ${Math.round(x.genRate)} tok/s</b>`
           : `<span class="dot ok"></span>${esc(short(x.id))} idle`).join(" &nbsp; ");
     renderHardware(L);
+    renderAlertBar(L.alerts || []);
+    const asig = (L.alerts || []).map((a) => a.since).join();
+    if (asig !== alertSig) { alertSig = asig; safe(refreshAlerts); }     // a new alert: notify now, not in 30 s
     const sig = liveModels.map((x) => x.id + x.processing).join();
     if (sig !== liveSig) { liveSig = sig; renderModels(); }
   } catch { $("status").textContent = "dashboard not reachable"; }
@@ -243,6 +246,48 @@ async function refreshEfficiency() {
         <td class="n">${(r.gen / r.wh).toFixed(0)}</td><td class="n">${nf(r.minutes)}</td></tr>`).join("")
     : `<tr><td class="muted">Generate with different power limits and compare speed and energy per token here.</td></tr>`;
 }
+
+// ---------- alerts: bar on top, rules and events, optional browser notifications ----------
+
+function renderAlertBar(active) {
+  const bar = $("alertBar");
+  bar.hidden = !active.length;
+  bar.innerHTML = active.map((a) => `<div>⚠️ <b>${esc(a.title)}</b> <span class="muted">since ${when(a.since)}</span></div>`).join("");
+}
+
+let lastNotified = 0, alertSig = "";
+try { lastNotified = Number(localStorage.getItem("wattllama-notified")) || 0; } catch {}
+async function refreshAlerts() {
+  const A = await get("api/alerts");
+  const s = A.settings;
+  const rule = (on, text) => on ? `<span class="chip">${esc(text)}</span>` : "";
+  $("alertRules").innerHTML = !s.enabled ? '<span class="muted">Alerts are off (DASH_ALERTS=0).</span>' : [
+    rule(s.gpuTemp != null, `GPU ≥ ${s.gpuTemp} °C`), rule(s.cpuTemp != null, `CPU ≥ ${s.cpuTemp} °C`), rule(s.vramPct != null, `VRAM ≥ ${s.vramPct} %`),
+    rule(s.throttle, "GPU throttling"), rule(s.engineDown, "engine down"), rule(s.busyMin, `busy > ${s.busyMin} min`),
+    rule(s.dailyKwh != null, `over ${s.dailyKwh} kWh / day`), rule(s.dailyCost != null, `over ${s.dailyCost} / day`),
+    `<span class="chip">${s.webhook === "invalid" ? "webhook: invalid URL" : s.webhook ? `to phone: ${esc(s.webhook)}` : "to phone: off (DASH_ALERT_WEBHOOK)"}</span>`,
+  ].join("");
+  $("alertEvents").innerHTML = A.events.length
+    ? `<tr><th>time</th><th>alert</th><th>details</th><th>sent</th></tr>` + A.events.slice(0, 30).map((e) => `<tr><td>${when(e.ts)}</td>
+        <td class="lvl-${esc(e.level)}">${esc(e.title)}</td><td>${esc(e.message)}</td><td>${e.sent ? "✓" : ""}</td></tr>`).join("")
+    : `<tr><td class="muted">No alerts yet. They appear here when a temperature, the VRAM, an engine or a budget needs attention.</td></tr>`;
+  // Browser notifications for new warnings, while this page is open somewhere.
+  const fresh = A.events.filter((e) => e.ts > lastNotified && e.level !== "ok");
+  if (fresh.length && "Notification" in window && Notification.permission === "granted" && lastNotified) {
+    for (const e of fresh.slice(0, 3).reverse()) new Notification(`WattLlama: ${e.title}`, { body: e.message, icon: "logo.svg", tag: `wl-${e.ts}` });
+  }
+  if (A.events[0]) { lastNotified = Math.max(lastNotified, A.events[0].ts); try { localStorage.setItem("wattllama-notified", String(lastNotified)); } catch {} }
+  else if (!lastNotified) lastNotified = 1;
+  drawNotifyBtn();
+}
+function drawNotifyBtn() {
+  const b = $("notifyBtn");
+  if (!("Notification" in window) || !isSecureContext) { b.hidden = true; return; }      // http on a LAN IP is not a secure context
+  b.hidden = false;
+  b.textContent = Notification.permission === "granted" ? "Browser notifications: on" : Notification.permission === "denied" ? "Browser notifications: blocked" : "Enable browser notifications";
+  b.disabled = Notification.permission !== "default";
+}
+$("notifyBtn").addEventListener("click", async () => { try { await Notification.requestPermission(); } catch {} drawNotifyBtn(); });
 
 // ---------- report: per day and per model for a period, CSV or print / PDF ----------
 
@@ -525,7 +570,7 @@ matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { dr
 const safe = (f) => f().catch(() => {});
 async function fast() { if (!document.hidden) await safe(refreshLive); setTimeout(fast, 2000); }
 async function slow() {
-  if (!document.hidden) { await safe(refreshSummary); await safe(refreshSeries); await safe(refreshRuns); await safe(refreshHeat); await safe(refreshEfficiency); await safe(refreshShare); await safe(refreshReport); }
+  if (!document.hidden) { await safe(refreshSummary); await safe(refreshSeries); await safe(refreshRuns); await safe(refreshHeat); await safe(refreshEfficiency); await safe(refreshShare); await safe(refreshReport); await safe(refreshAlerts); }
   setTimeout(slow, 30000);
 }
 async function slowest() { if (!document.hidden) await safe(refreshSetup); setTimeout(slowest, 60000); }
