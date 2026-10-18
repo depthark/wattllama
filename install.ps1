@@ -63,6 +63,11 @@ $line = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$Dir\sampler.
 $cpuW = ("$line" -split ',')[0]
 Write-Host ('CPU power:      ' + $(if ($cpuW -and $cpuW -ne 'nan') { "Windows Energy Meter, measured ($cpuW W now)" } else { 'not exposed by Windows here, estimated from load (DASH_CPU_MAX_W)' }))
 
+foreach ($e in @(@('llama.cpp', 'http://127.0.0.1:8080/models'), @('Ollama', 'http://127.0.0.1:11434/api/ps'), @('LM Studio', 'http://127.0.0.1:1234/api/v1/models'))) {
+    $state = try { Invoke-WebRequest $e[1] -UseBasicParsing -TimeoutSec 2 | Out-Null; 'running, found' } catch { 'not running now (found automatically when it starts)' }
+    Write-Host ('{0,-16}{1}' -f "$($e[0]):", $state)
+}
+
 # --- scheduled task at logon, current user, no admin ---
 $action   = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Dir\start.ps1`""
 $trigger  = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
