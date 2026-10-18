@@ -6,6 +6,7 @@
 //   token counts           print_timing lines in server.log (exact); without the log, /slots (close)
 // Models served by another runner (no llama-server child) show as loaded, without tokens.
 
+import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -30,6 +31,11 @@ export function parseLaunch(line) {
   const q = line.match(/cmd="((?:[^"\\]|\\.)*)"/);
   let cmd = q ? q[1] : line;
   try { if (q) cmd = JSON.parse(`"${q[1]}"`); } catch {}
+  return parseCmd(cmd);
+}
+
+// A llama-server command line started by Ollama -> { hash, port, args }.
+export function parseCmd(cmd) {
   const hash = cmd.match(/sha256-([0-9a-f]{64})/)?.[1];
   const port = cmd.match(/--port (\d+)/)?.[1];
   if (!hash || !port) return null;
@@ -47,7 +53,22 @@ export function create({ env, addTokens }) {
   const launches = new Map();     // blob hash -> { port, args }
   const blobOf = new Map();       // "name@digest" -> { hash, kind }
   const slots = new Map();        // port -> slotPoller
-  let last = { t: 0, models: [] }, scanned = false;
+  let last = { t: 0, models: [] }, scanned = false, psSig = "";
+
+  // No server.log (e.g. "ollama serve" in a terminal): read the children's command lines
+  // from Windows instead. Only when the set of loaded models changes, so it stays rare.
+  function scanProcesses() {
+    if (process.platform !== "win32") return;
+    const ps = `Get-CimInstance Win32_Process -Filter "Name='llama-server.exe'" | ForEach-Object { $_.CommandLine }`;
+    execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], { windowsHide: true, timeout: 15_000 }, (e, out) => {
+      if (e) return;
+      for (const l of String(out).split(/\r?\n/)) {
+        if (!/ollama/i.test(l)) continue;
+        const x = parseCmd(l.replace(/"/g, ""));
+        if (x) launches.set(x.hash, x);
+      }
+    });
+  }
 
   // Children started before WattLlama: find their launch lines in the end of the log.
   function scanBack() {
@@ -88,6 +109,9 @@ export function create({ env, addTokens }) {
       else { const t = parseLlamaLine(l); if (t) tokenLines.push(t); }
     }
     const useLog = lines != null;
+    const sig = ps.map((m) => m.name + m.digest).join();
+    if (!useLog && sig !== psSig && ps.length) scanProcesses();
+    psSig = sig;
     const now = Date.now(), dt = (now - (last.t || now)) / 1000;
     const prev = new Map(last.models.map((m) => [m.id, m]));
     const models = [];
@@ -118,7 +142,7 @@ export function create({ env, addTokens }) {
     const noChild = models.filter((m) => !m.child).map((m) => m.id);
     for (const m of models) delete m.child;
     last = { t: now, models };
-    const note = noChild.length ? `no token counts for ${noChild.join(", ")} (not run by llama-server)`
+    const note = noChild.length && useLog ?`no token counts for ${noChild.join(", ")} (not run by llama-server)`
       : ps.length && !useLog ? "server.log not found: token counts from /slots, close but not exact" : undefined;
     return { models, tokenSource: useLog ? "log" : ps.length ? "slots" : "none", note };
   }
