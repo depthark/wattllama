@@ -94,7 +94,7 @@ function renderModels() {
       <div class="row"><span>all time</span><span>${nf(a?.req || 0)} req · ${a?.gen ? `${nf(a.gen)} tok · ${energy(a.wh / (a.gen / 1000))} / 1k tok` : `${dur(a?.act || 0)} busy · ${a?.req ? energy(a.wh / a.req) + " / req" : "–"}`}</span></div>` : "";
     return `<div class="card"><h3><span class="dot ${st[0]}"></span>${esc(st[1])}${m.kind && m.kind !== "text" ? ` · ${esc(m.kind)}` : ""}<span class="eng">${esc(m.engine)}</span></h3>
       <div style="font-weight:600;margin-bottom:4px;word-break:break-all">${esc(m.id)}</div>
-      <div class="muted" style="font-size:12px;margin-bottom:8px">${[bn(m.params), gb(m.size), m.ctxTrain ? `trained ctx ${nf(m.ctxTrain)}` : ""].filter(Boolean).join(" · ")}</div>
+      <div class="muted" style="font-size:12px;margin-bottom:8px">${[m.paramsText ? `${esc(m.paramsText)} params` : bn(m.params), gb(m.size), m.ctxTrain ? `trained ctx ${nf(m.ctxTrain)}` : ""].filter(Boolean).join(" · ")}</div>
       ${rows}<div style="margin-top:8px">${m.args.length ? chips(m.args.map(([k, v]) => v === "" ? esc(k) : `${esc(k)} <b>${esc(v)}</b>`), "k") : '<span class="muted">not loaded: parameters appear once it runs</span>'}</div>
     </div>`;
   }).join("");
