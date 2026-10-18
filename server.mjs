@@ -35,6 +35,10 @@ const CFG = {
   psuEff: Number(process.env.DASH_PSU_EFF || 0.88),
   cpuMaxW: Number(process.env.DASH_CPU_MAX_W || 65),
   intervalMs: Number(process.env.DASH_INTERVAL_MS || 2000),
+  // Optional: what a kWh costs you (all-in: energy, distribution, fees, tax) and its currency.
+  // Unset = watts and kWh only.
+  price: ((p) => Number.isFinite(p) && p > 0 && p < 1000 ? p : null)(parseFloat(String(process.env.DASH_PRICE_PER_KWH || "").replace(",", "."))),
+  currency: String(process.env.DASH_CURRENCY || "").trim().slice(0, 8),
   dataDir: path.resolve(DIR, process.env.DASH_DATA_DIR || "data"),
 };
 
@@ -475,9 +479,54 @@ function period(from, to = Date.now() + 60_000) {
 }
 
 // Per model: tokens, busy time and whole-PC energy while it was busy.
-function perModel(from) {
+function perModel(from, to = Date.now() + 60_000) {
   return db.prepare(`SELECT model, SUM(active_s) act, SUM(wh) wh, SUM(gen_tok) gen, SUM(pp_tok) pp, SUM(req) req
-    FROM mm WHERE ts >= ? GROUP BY model ORDER BY SUM(active_s) DESC`).all(from);
+    FROM mm WHERE ts >= ? AND ts < ? GROUP BY model ORDER BY SUM(active_s) DESC`).all(from, to);
+}
+
+// Report: one row per local day plus per-model totals, for a fixed list of periods.
+const REPORT_PERIODS = ["this-month", "last-month", "7d", "30d", "this-year", "last-year", "all"];
+function reportRange(p) {
+  const now = new Date(), d0 = new Date(now); d0.setHours(0, 0, 0, 0);
+  const end = Date.now() + 60_000;
+  switch (p) {
+    case "last-month": return [new Date(now.getFullYear(), now.getMonth() - 1, 1).getTime(), new Date(now.getFullYear(), now.getMonth(), 1).getTime()];
+    case "7d": return [d0.getTime() - 6 * 86400_000, end];
+    case "30d": return [d0.getTime() - 29 * 86400_000, end];
+    case "this-year": return [new Date(now.getFullYear(), 0, 1).getTime(), end];
+    case "last-year": return [new Date(now.getFullYear() - 1, 0, 1).getTime(), new Date(now.getFullYear(), 0, 1).getTime()];
+    case "all": return [0, end];
+    default: return [new Date(now.getFullYear(), now.getMonth(), 1).getTime(), end];
+  }
+}
+function report(p) {
+  if (!REPORT_PERIODS.includes(p)) p = "this-month";
+  const [from, to] = reportRange(p);
+  const days = db.prepare(`SELECT date(ts / 1000, 'unixepoch', 'localtime') day, SUM(secs) secs, SUM(wh) wh, SUM(wh_active) wha,
+      SUM(active_s) act, SUM(gen_tok) gen, SUM(pp_tok) pp, MAX(gpu_tmax) gpu_tmax, MAX(cpu_tmax) cpu_tmax
+    FROM m WHERE ts >= ? AND ts < ? GROUP BY day ORDER BY day`).all(from, to);
+  return { period: p, from, to: Math.min(to, Date.now()), price: CFG.price, currency: CFG.currency,
+    total: period(from, to), days, models: perModel(from, to) };
+}
+
+function reportCSV(res, sendHeaders, p) {
+  const r = report(p);
+  const cost = (wh) => CFG.price ? (wh / 1000 * CFG.price).toFixed(2) : "";
+  const cur = CFG.price ? ` (${CFG.currency || "cost"})` : "";
+  const q = (s) => /[",\r\n]/.test(s) || /^[=+\-@]/.test(s) ? `"${String(s).replace(/^([=+\-@])/, "'$1").replace(/"/g, '""')}"` : s;
+  const lines = [`WattLlama report,${r.period},${new Date(r.from).toISOString()},${new Date(r.to).toISOString()}`, "",
+    `day,PC on (h),energy (kWh),LLM energy (kWh),LLM busy (h),generated tokens,prompt tokens,GPU max (°C),CPU max (°C)${CFG.price ? `,cost${cur},LLM cost${cur}` : ""}`];
+  for (const d of r.days) lines.push([d.day, (d.secs / 3600).toFixed(2), (d.wh / 1000).toFixed(3), (d.wha / 1000).toFixed(3), (d.act / 3600).toFixed(2),
+    d.gen, d.pp, d.gpu_tmax ?? "", d.cpu_tmax == null ? "" : d.cpu_tmax.toFixed(0), ...(CFG.price ? [cost(d.wh), cost(d.wha)] : [])].join(","));
+  const t = r.total;
+  lines.push(["total", (t.secs / 3600).toFixed(2), (t.wh / 1000).toFixed(3), (t.wha / 1000).toFixed(3), (t.act / 3600).toFixed(2), t.gen, t.pp, "", "",
+    ...(CFG.price ? [cost(t.wh), cost(t.wha)] : [])].join(","));
+  lines.push("", `model,requests,generated tokens,prompt tokens,busy (h),energy while busy (kWh),Wh per 1k tokens${CFG.price ? `,cost${cur}` : ""}`);
+  for (const m of r.models) lines.push([q(m.model), m.req, m.gen, m.pp, (m.act / 3600).toFixed(2), (m.wh / 1000).toFixed(3),
+    m.gen ? (m.wh / (m.gen / 1000)).toFixed(2) : "", ...(CFG.price ? [cost(m.wh)] : [])].join(","));
+  if (CFG.price) lines.push("", `price per kWh,${CFG.price},${q(CFG.currency)}`);
+  sendHeaders({ "content-type": "text/csv; charset=utf-8", "content-disposition": `attachment; filename="wattllama-report-${r.period}.csv"` });
+  res.end("﻿" + lines.join("\r\n") + "\r\n");      // BOM + CRLF: Excel opens it with the right characters
 }
 
 function summary() {
@@ -485,7 +534,7 @@ function summary() {
   const today = d.getTime();
   return {
     models: { today: perModel(today), week: perModel(Date.now() - 7 * 86400_000), all: perModel(0) },
-    restW: CFG.restW, psuEff: CFG.psuEff, idleW: idleBaseline(),
+    restW: CFG.restW, psuEff: CFG.psuEff, idleW: idleBaseline(), price: CFG.price, currency: CFG.currency,
     first: db.prepare("SELECT MIN(ts) t FROM m").get().t,
     today: period(today), yesterday: period(today - 86400_000, today),
     week: period(Date.now() - 7 * 86400_000),
@@ -754,6 +803,11 @@ http.createServer(async (req, res) => {
     if (u.pathname === "/api/setup") return json(await setup());
     if (u.pathname === "/api/efficiency") return json(efficiency());
     if (u.pathname === "/api/share") return json(share());
+    if (u.pathname === "/api/report") return json(report(u.searchParams.get("period")));
+    if (u.pathname === "/api/report.csv") {
+      if (req.method === "HEAD") return send(200, "text/csv; charset=utf-8", "");
+      return reportCSV(res, (h) => res.writeHead(200, { ...SECURITY_HEADERS, ...h }), u.searchParams.get("period"));
+    }
     if (u.pathname === "/api/export.csv") {
       if (req.method === "HEAD") return send(200, "text/csv; charset=utf-8", "");
       return exportCSV(res, (h) => res.writeHead(200, { ...SECURITY_HEADERS, ...h }), u.searchParams.get("data"), u.searchParams.get("range"));

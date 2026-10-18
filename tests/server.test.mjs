@@ -40,7 +40,8 @@ test("server: security rules, endpoints, AMD GPU via LibreHardwareMonitor", { ti
   const port = await freePort();
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "wattllama-srv-"));
   const env = { ...process.env, DASH_PORT: String(port), DASH_HOST: "127.0.0.1", DASH_DATA_DIR: dataDir, DASH_LHM_URL: lhm.url,
-    DASH_LLAMA_URL: "", DASH_OLLAMA_URL: "", DASH_LMSTUDIO_URL: "", DASH_TOKEN: "", DASH_TASKS: "", DASH_ALLOW_POWER_LIMIT: "0" };
+    DASH_LLAMA_URL: "", DASH_OLLAMA_URL: "", DASH_LMSTUDIO_URL: "", DASH_TOKEN: "", DASH_TASKS: "", DASH_ALLOW_POWER_LIMIT: "0",
+    DASH_PRICE_PER_KWH: "6,5", DASH_CURRENCY: "CZK" };
   const srv = spawn(process.execPath, ["--no-warnings", path.join(ROOT, "server.mjs"), "--demo"], { env, stdio: ["ignore", "pipe", "pipe"] });
   let out = ""; srv.stdout.on("data", (d) => out += d); srv.stderr.on("data", (d) => out += d);
   try {
@@ -77,6 +78,15 @@ test("server: security rules, endpoints, AMD GPU via LibreHardwareMonitor", { ti
     const lines = csv.body.split(/\n/);
     assert.match(lines[0], /^time,start,end,model,/);
     assert.ok(lines.length > 10, "demo runs exported");
+    const rep = JSON.parse((await request(port, { path: "/api/report?period=30d" })).body);
+    assert.equal(rep.price, 6.5, "comma decimal accepted");
+    assert.equal(rep.currency, "CZK");
+    assert.ok(rep.days.length >= 14 && rep.models.length === 2, "demo days and models in the report");
+    assert.equal(JSON.parse((await request(port, { path: "/api/report?period=x'--" })).body).period, "this-month");
+    const rcsv = await request(port, { path: "/api/report.csv?period=all" });
+    assert.match(rcsv.headers["content-disposition"], /wattllama-report-all\.csv/);
+    assert.ok(rcsv.body.includes(",cost (CZK),LLM cost (CZK)"));
+    assert.ok(rcsv.body.includes("\r\ntotal,"));
     const bad = await request(port, { path: "/api/export.csv?data=sqlite_master;--&range=x" });
     assert.match(bad.headers["content-disposition"], /wattllama-minutes-30d\.csv/);
 

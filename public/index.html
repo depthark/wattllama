@@ -26,6 +26,7 @@
       <div class="row"><span>PC on</span><span id="todayOn">–</span></div>
       <div class="row l"><span>while the LLM generated</span><span id="todayL">–</span></div>
       <div class="row"><span>extra over idle</span><span id="todayExtra">–</span></div>
+      <div class="row l" id="costRow" hidden><span>cost</span><span id="todayCost">–</span></div>
     </div>
     <div class="card"><h3>History</h3>
       <div class="row"><span>yesterday</span><span id="yKwh">–</span></div>
@@ -38,6 +39,7 @@
       <div class="row"><span>LLM busy today</span><span id="actToday">–</span></div>
       <div class="row"><span>energy per 1k tokens</span><span id="whk">–</span></div>
       <div class="row"><span>energy per 1M tokens</span><span id="per1m">–</span></div>
+      <div class="row" id="costMRow" hidden><span>cost per 1M tokens</span><span id="costM">–</span></div>
     </div>
   </section>
 
@@ -82,7 +84,26 @@
   <h2 class="sec">LLM runs</h2>
   <div class="card scroll"><table id="runs"></table><button class="theme" id="runsMore" hidden style="margin-top:8px"></button></div>
 
-  <h2 class="sec">Share your result</h2>
+  <section id="reportWrap">
+    <div class="report-head">
+      <h2 class="sec">Report</h2>
+      <div class="hd noprint">
+        <select id="reportPeriod" class="sel" aria-label="Period">
+          <option value="this-month">This month</option><option value="last-month">Last month</option>
+          <option value="7d">Last 7 days</option><option value="30d">Last 30 days</option>
+          <option value="this-year">This year</option><option value="last-year">Last year</option><option value="all">All time</option>
+        </select>
+        <a class="theme btn" id="reportCsv" download>Download CSV</a><button class="theme" id="reportPrint">Print / save as PDF</button>
+      </div>
+    </div>
+    <div class="printonly report-title"><img src="logo.svg" alt="" width="22" height="22"> WattLlama report · <span id="reportTitle"></span></div>
+    <div class="grid" id="reportCards"></div>
+    <div class="card scroll"><table id="reportDays"></table></div>
+    <div class="card scroll" style="margin-top:10px"><table id="reportModels"></table></div>
+    <div class="muted printonly" style="font-size:11px;margin-top:8px" id="reportNote"></div>
+  </section>
+
+  <h2 class="sec noprint">Share your result</h2>
   <div class="card" id="shareCard">
     <div class="muted" style="font-size:13px;margin-bottom:8px">Add your PC to the <a href="https://github.com/depthark/wattllama/blob/main/RESULTS.md" target="_blank" rel="noopener noreferrer">community results</a>: how fast and how efficient local models are on real hardware.
       Only what you see below is shared, and only if you open the issue yourself.</div>

@@ -52,6 +52,8 @@ so every client that talks to it is counted.
 | 📋 **Runs** | One row per generation run: model, duration, requests, tokens, tok/s, Wh, Wh per 1k tokens |
 | 🏆 **Community results** | Turn your numbers into a prefilled GitHub issue for [RESULTS.md](RESULTS.md); you see exactly what is shared |
 | ⚙️ **Setup at a glance** | The real arguments each model runs with (secrets masked), [pi](https://github.com/badlogic/pi-mono) agent settings if you use it, chosen Windows scheduled tasks with last/next run |
+| 🧾 **Reports** | This month, last month, last 7 / 30 days, this or last year: per day and per model, as CSV or print / PDF |
+| 💶 **Cost (optional)** | Set your price per kWh and currency to see money next to every kWh; off by default |
 | 📤 **CSV export** | Minutes, per-model minutes and runs, for your own spreadsheets |
 | 🌓 **Light & dark** | Follows Windows, or pick one |
 | 🪶 **Featherweight** | Measured: **0.02 % CPU, ~150 MB RAM** in total; generation speed unchanged (54–60 tok/s with and without it) |
@@ -63,6 +65,7 @@ so every client that talks to it is counted.
 ![Light theme](docs/screenshot-light.png)
 ![Hardware and power limit](docs/hardware.png)
 ![Models from llama.cpp and Ollama side by side, with their arguments](docs/models.png)
+![Report per day and per model, with optional cost](docs/report.png)
 ![Share your result](docs/share.png)
 
 </details>
@@ -174,7 +177,8 @@ For exact wall-socket numbers, nothing beats a smart plug with energy metering; 
 *where* the watts go and how much of it the LLM caused.
 
 History lives in `data/power.db` (SQLite, built into Node.js): one row per minute, roughly 5–7 MB a
-month. Export it as CSV from the links next to the chart ranges.
+month. Export it as CSV from the links next to the chart ranges, or as a report per day and per model
+(CSV, or *Print / save as PDF*) from the Report section.
 
 ## Compared with popular tools
 
@@ -228,6 +232,7 @@ Everything lives in `.env` (see [.env.example](.env.example)); all settings are 
 | `DASH_OLLAMA_LOG` | `%LOCALAPPDATA%\Ollama\server.log` | Ollama's log, for exact token counts |
 | `DASH_LMSTUDIO_URL` | `http://127.0.0.1:1234` | empty = off |
 | `DASH_LMSTUDIO_API_KEY` / `DASH_LMSTUDIO_LMS` | – / found | if the server requires a token / path to `lms` |
+| `DASH_PRICE_PER_KWH` / `DASH_CURRENCY` | – | optional cost: all-in price per kWh from your bill, e.g. `0.30` / `EUR` |
 | `DASH_REST_W` / `DASH_PSU_EFF` | `35` / `0.88` | the estimated part |
 | `DASH_CPU_MAX_W` | `65` | only used without RAPL counters |
 | `DASH_LHM_URL` | – | LibreHardwareMonitor web server |

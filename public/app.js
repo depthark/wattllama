@@ -8,6 +8,17 @@ const energy = (wh) => wh >= 1000 ? `${(wh / 1000).toFixed(2)} kWh` : `${wh.toFi
 const dur = (s) => s < 60 ? `${Math.round(s)} s` : s < 3600 ? `${Math.round(s / 60)} min` : `${(s / 3600).toFixed(1)} h`;
 const nf = (n) => Math.round(n).toLocaleString();
 const when = (t) => new Date(t).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+// Optional cost (DASH_PRICE_PER_KWH / DASH_CURRENCY): "" when no price is set.
+let PRICE = null, CUR = "";
+function money(wh) {
+  if (!PRICE || wh == null) return "";
+  const v = wh / 1000 * PRICE, digits = v < 1000 ? 2 : 0;
+  if (/^[A-Z]{3}$/.test(CUR)) {
+    try { return new Intl.NumberFormat(undefined, { style: "currency", currency: CUR, minimumFractionDigits: digits, maximumFractionDigits: digits }).format(v); } catch {}
+  }
+  return `${v.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits })}${CUR ? " " + CUR : ""}`;
+}
+const withCost = (wh) => PRICE ? `${energy(wh)} · ${money(wh)}` : energy(wh);
 const extraWh = (p) => S.idleW == null ? null : Math.max(0, p.wha - S.idleW * p.act / 3600);
 
 async function get(u) { const r = await fetch(u, { cache: "no-store" }); if (!r.ok) throw new Error(r.status); return r.json(); }
@@ -36,16 +47,20 @@ async function refreshLive() {
 async function refreshSummary() {
   S = await get("api/summary");
   renderModels(); fillHeatModels();
+  PRICE = S.price; CUR = S.currency || "";
   const t = S.today, m = S.month, a = S.all;
   $("todayKwh").textContent = energy(t.wh);
+  for (const id of ["costRow", "costMRow"]) $(id).hidden = !PRICE;
+  $("todayCost").textContent = PRICE ? `${money(t.wh)} · LLM ${money(t.wha)}` : "";
+  $("costM").textContent = PRICE && a.gen > 0 ? money(a.wha / (a.gen / 1e6)) : "–";
   $("todayOn").textContent = dur(t.secs);
   $("todayL").textContent = `${energy(t.wha)} · ${dur(t.act)}`;
   const ex = extraWh(t);
   $("todayExtra").textContent = ex == null ? "learning idle power…" : `${energy(ex)} (idle ≈ ${Math.round(S.idleW)} W)`;
-  $("yKwh").textContent = energy(S.yesterday.wh);
-  $("wKwh").textContent = energy(S.week.wh);
-  $("mKwh").textContent = energy(m.wh);
-  $("mL").textContent = `${energy(m.wha)} · ${dur(m.act)}`;
+  $("yKwh").textContent = withCost(S.yesterday.wh);
+  $("wKwh").textContent = withCost(S.week.wh);
+  $("mKwh").textContent = withCost(m.wh);
+  $("mL").textContent = `${withCost(m.wha)} · ${dur(m.act)}`;
   $("tokToday").innerHTML = `${nf(t.gen)} <small>tokens today</small>`;
   $("actToday").textContent = `${dur(t.act)} · prefill ${nf(t.pp)}`;
   $("whk").textContent = a.gen > 0 ? energy(a.wha / (a.gen / 1000)) : "–";
@@ -70,11 +85,11 @@ function drawRuns() {
   $("runsMore").hidden = runsData.length <= 10;
   $("runsMore").textContent = runsAll ? "Show fewer" : `Show all ${runsData.length}`;
   $("runs").innerHTML = R.length
-    ? `<tr><th>start</th><th>model</th><th class="n">busy</th><th class="n">requests</th><th class="n">tokens</th><th class="n">prefill</th><th class="n">tok/s</th><th class="n">energy</th><th class="n">Wh / 1k tok</th></tr>`
+    ? `<tr><th>start</th><th>model</th><th class="n">busy</th><th class="n">requests</th><th class="n">tokens</th><th class="n">prefill</th><th class="n">tok/s</th><th class="n">energy</th>${PRICE ? '<th class="n">cost</th>' : ""}<th class="n">Wh / 1k tok</th></tr>`
       + R.map((r) => `<tr><td>${r.open ? '<span class="dot run"></span>' : ""}${when(r.start)}</td><td>${esc(r.model || "–")}</td>
         <td class="n">${dur(r.active_s)}</td><td class="n">${nf(r.req || 0)}</td><td class="n">${nf(r.gen_tok)}</td><td class="n">${nf(r.pp_tok)}</td>
         <td class="n">${r.active_s > 0 && r.gen_tok ? (r.gen_tok / r.active_s).toFixed(1) : "–"}</td>
-        <td class="n">${energy(r.wh)}</td><td class="n">${r.gen_tok ? (r.wh / (r.gen_tok / 1000)).toFixed(2) : "–"}</td></tr>`).join("")
+        <td class="n">${energy(r.wh)}</td>${PRICE ? `<td class="n">${money(r.wh)}</td>` : ""}<td class="n">${r.gen_tok ? (r.wh / (r.gen_tok / 1000)).toFixed(2) : "–"}</td></tr>`).join("")
     : `<tr><td class="muted">No runs yet. A run is recorded each time a model works.</td></tr>`;
 }
 $("runsMore").addEventListener("click", () => { runsAll = !runsAll; drawRuns(); });
@@ -97,7 +112,7 @@ function renderModels() {
     const t = stat("today", m.id), a = stat("all", m.id);
     const rows = t || a ? `
       <div class="row"><span>today</span><span>${nf(t?.req || 0)} req · ${t?.gen ? nf(t.gen) + " tok out · " : ""}${nf(t?.pp || 0)} tok in · ${dur(t?.act || 0)} busy</span></div>
-      <div class="row"><span>energy while busy today</span><span>${energy(t?.wh || 0)}</span></div>
+      <div class="row"><span>energy while busy today</span><span>${withCost(t?.wh || 0)}</span></div>
       <div class="row"><span>all time</span><span>${nf(a?.req || 0)} req · ${a?.gen ? `${nf(a.gen)} tok · ${energy(a.wh / (a.gen / 1000))} / 1k tok` : `${dur(a?.act || 0)} busy · ${a?.req ? energy(a.wh / a.req) + " / req" : "–"}`}</span></div>` : "";
     return `<div class="card"><h3><span class="dot ${st[0]}"></span>${esc(st[1])}${m.kind && m.kind !== "text" ? ` · ${esc(m.kind)}` : ""}<span class="eng">${esc(m.engine)}</span></h3>
       <div style="font-weight:600;margin-bottom:4px;word-break:break-all">${esc(m.id)}</div>
@@ -228,6 +243,41 @@ async function refreshEfficiency() {
         <td class="n">${(r.gen / r.wh).toFixed(0)}</td><td class="n">${nf(r.minutes)}</td></tr>`).join("")
     : `<tr><td class="muted">Generate with different power limits and compare speed and energy per token here.</td></tr>`;
 }
+
+// ---------- report: per day and per model for a period, CSV or print / PDF ----------
+
+const PERIOD_NAMES = { "this-month": "this month", "last-month": "last month", "7d": "last 7 days", "30d": "last 30 days",
+  "this-year": "this year", "last-year": "last year", all: "all time" };
+async function refreshReport() {
+  const p = $("reportPeriod").value;
+  $("reportCsv").href = `api/report.csv?period=${encodeURIComponent(p)}`;
+  const R = await get(`api/report?period=${encodeURIComponent(p)}`);
+  PRICE = R.price; CUR = R.currency || "";
+  const t = R.total, day = (d) => new Date(d + "T12:00").toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" });
+  const range = `${new Date(R.from).toLocaleDateString()} – ${new Date(R.to).toLocaleDateString()}`;
+  $("reportTitle").textContent = `${PERIOD_NAMES[R.period] || R.period} (${range})`;
+  const card = (title, big, rows) => `<div class="card"><h3>${title}</h3><div class="big">${big}</div>${rows.map(([k, v]) => `<div class="row"><span>${k}</span><span>${v}</span></div>`).join("")}</div>`;
+  $("reportCards").innerHTML = [
+    card("Energy", energy(t.wh), [["PC on", dur(t.secs)], ["average", t.secs ? fmtW(t.wh / (t.secs / 3600)) : "–"]]),
+    card("LLM", energy(t.wha), [["busy", dur(t.act)], ["share of energy", t.wh ? `${Math.round(100 * t.wha / t.wh)} %` : "–"]]),
+    card("Tokens", nf(t.gen), [["prompt tokens", nf(t.pp)], ["energy per 1k tokens", t.gen ? energy(t.wha / (t.gen / 1000)) : "–"]]),
+    ...(PRICE ? [card("Cost", money(t.wh), [["of which LLM", money(t.wha)], ["price", `${money(1000)} / kWh`]])] : []),
+  ].join("");
+  $("reportDays").innerHTML = R.days.length
+    ? `<tr><th>day</th><th class="n">PC on</th><th class="n">energy</th><th class="n">LLM energy</th><th class="n">LLM busy</th><th class="n">tokens</th><th class="n">GPU max</th>${PRICE ? '<th class="n">cost</th>' : ""}</tr>`
+      + R.days.map((d) => `<tr><td>${esc(day(d.day))}</td><td class="n">${dur(d.secs)}</td><td class="n">${energy(d.wh)}</td><td class="n">${energy(d.wha)}</td>
+        <td class="n">${dur(d.act)}</td><td class="n">${nf(d.gen)}</td><td class="n">${d.gpu_tmax ? `${Math.round(d.gpu_tmax)} °C` : "–"}</td>${PRICE ? `<td class="n">${money(d.wh)}</td>` : ""}</tr>`).join("")
+      + `<tr><th>total</th><th class="n">${dur(t.secs)}</th><th class="n">${energy(t.wh)}</th><th class="n">${energy(t.wha)}</th><th class="n">${dur(t.act)}</th><th class="n">${nf(t.gen)}</th><th></th>${PRICE ? `<th class="n">${money(t.wh)}</th>` : ""}</tr>`
+    : `<tr><td class="muted">No data in this period.</td></tr>`;
+  $("reportModels").innerHTML = R.models.length
+    ? `<tr><th>model</th><th class="n">requests</th><th class="n">tokens out</th><th class="n">tokens in</th><th class="n">busy</th><th class="n">energy while busy</th><th class="n">Wh / 1k tok</th>${PRICE ? '<th class="n">cost</th>' : ""}</tr>`
+      + R.models.map((m) => `<tr><td>${esc(short(m.model))}</td><td class="n">${nf(m.req || 0)}</td><td class="n">${nf(m.gen)}</td><td class="n">${nf(m.pp)}</td><td class="n">${dur(m.act)}</td>
+        <td class="n">${energy(m.wh)}</td><td class="n">${m.gen ? (m.wh / (m.gen / 1000)).toFixed(2) : "–"}</td>${PRICE ? `<td class="n">${money(m.wh)}</td>` : ""}</tr>`).join("")
+    : `<tr><td class="muted">No model activity in this period.</td></tr>`;
+  $("reportNote").textContent = $("foot").textContent;
+}
+$("reportPeriod").addEventListener("change", () => safe(refreshReport));
+$("reportPrint").addEventListener("click", () => print());
 
 // ---------- share your result (community RESULTS.md) ----------
 
@@ -475,7 +525,7 @@ matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { dr
 const safe = (f) => f().catch(() => {});
 async function fast() { if (!document.hidden) await safe(refreshLive); setTimeout(fast, 2000); }
 async function slow() {
-  if (!document.hidden) { await safe(refreshSummary); await safe(refreshSeries); await safe(refreshRuns); await safe(refreshHeat); await safe(refreshEfficiency); await safe(refreshShare); }
+  if (!document.hidden) { await safe(refreshSummary); await safe(refreshSeries); await safe(refreshRuns); await safe(refreshHeat); await safe(refreshEfficiency); await safe(refreshShare); await safe(refreshReport); }
   setTimeout(slow, 30000);
 }
 async function slowest() { if (!document.hidden) await safe(refreshSetup); setTimeout(slowest, 60000); }
