@@ -1,0 +1,46 @@
+# WattLlama RAPL helper: CPU package + DRAM watts for the WattLlama dashboard, as a 2-second
+# average in /run/wattllama/rapl. Installed by install.sh --rapl, removed by uninstall.sh.
+[Unit]
+Description=WattLlama RAPL helper (CPU power for the WattLlama dashboard)
+Documentation=https://github.com/depthark/wattllama
+
+[Service]
+ExecStart=/usr/local/lib/wattllama/rapl-helper
+Restart=on-failure
+RestartSec=10
+RuntimeDirectory=wattllama
+RuntimeDirectoryMode=0755
+UMask=0022
+Nice=10
+# Root only to read the counters; everything else is taken away.
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/run/wattllama
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+MemoryMax=32M
+TasksMax=8
+
+[Install]
+WantedBy=multi-user.target

@@ -6,7 +6,7 @@
 //   token counts           print_timing lines in server.log (exact); without the log, /slots (close)
 // Models served by another runner (no llama-server child) show as loaded, without tokens.
 
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -22,8 +22,45 @@ function baseUrl(env) {
   return `http://${!host || host === "0.0.0.0" || host === "[::]" ? "127.0.0.1" : host}:${port || 11434}`;
 }
 
-const defaultLog = (env) => env.LOCALAPPDATA ? path.join(env.LOCALAPPDATA, "Ollama", "server.log")
-  : path.join(os.homedir(), ".ollama", "logs", "server.log");
+// Where Ollama writes its log: the Windows app and macOS app use a file; on Linux the
+// systemd service logs to the journal (read with journalctl, see journal() below).
+const defaultLog = (env) => process.platform === "win32" ? (env.LOCALAPPDATA ? path.join(env.LOCALAPPDATA, "Ollama", "server.log") : "")
+  : process.platform === "darwin" ? path.join(os.homedir(), ".ollama", "logs", "server.log") : "";
+
+// Linux: Ollama's systemd service logs to the journal. One long-running "journalctl -f" child
+// delivers new lines; it is started only if the journal is readable (the user is in the
+// systemd-journal or adm group), else counts fall back to /slots. Returns a reader like tail():
+// new lines, or null while no journal is available.
+export function journal(unit = "ollama", { onBacklog } = {}) {
+  let state = "unknown", child = null, queue = [], retryAt = 0;
+  const start = () => {
+    state = "checking";
+    execFile("journalctl", ["-u", unit, "-n", "5000", "-o", "cat", "--no-pager", "-q"], { maxBuffer: 32 << 20, timeout: 20_000 }, (e, out) => {
+      const lines = String(out || "").split("\n").filter(Boolean);
+      if (e || !lines.length) { state = "none"; retryAt = Date.now() + 5 * 60_000; return; }
+      onBacklog?.(lines);
+      child = spawn("journalctl", ["-u", unit, "-f", "-n", "0", "-o", "cat", "--no-pager", "-q"], { stdio: ["ignore", "pipe", "ignore"] });
+      let buf = "";
+      child.stdout.on("data", (d) => {
+        buf += d;
+        const parts = buf.split("\n"); buf = parts.pop();
+        if (buf.length > 1 << 20) buf = "";
+        queue.push(...parts);
+        if (queue.length > 100_000) queue = queue.slice(-50_000);
+      });
+      child.on("exit", () => { child = null; state = "none"; retryAt = Date.now() + 10_000; });
+      state = "on";
+    });
+  };
+  process.on("exit", () => child?.kill());
+  const read = () => {
+    if (state === "unknown" || (state === "none" && Date.now() >= retryAt)) start();
+    if (state !== "on") return null;
+    const out = queue; queue = []; return out;
+  };
+  read.stop = () => { retryAt = Infinity; state = "none"; child?.kill(); };
+  return read;
+}
 
 // A "starting llama-server" line -> { hash, port, args } (Go's slog quotes the command).
 export function parseLaunch(line) {
@@ -49,15 +86,29 @@ export function create({ env, addTokens }) {
   const url = baseUrl(env);
   if (!url) return null;
   const logFile = env.DASH_OLLAMA_LOG ?? defaultLog(env);
-  const readLog = logFile ? tail(logFile) : null;
   const launches = new Map();     // blob hash -> { port, args }
+  const useJournal = !logFile && process.platform === "linux" && env.DASH_OLLAMA_JOURNAL !== "0";
+  const readLog = logFile ? tail(logFile)
+    : useJournal ? journal(env.DASH_OLLAMA_UNIT || "ollama", { onBacklog: (lines) => {
+      for (const l of lines) { const x = parseLaunch(l); if (x) launches.set(x.hash, x); }
+    } }) : null;
   const blobOf = new Map();       // "name@digest" -> { hash, kind }
   const slots = new Map();        // port -> slotPoller
   let last = { t: 0, models: [] }, scanned = false, psSig = "";
 
-  // No server.log (e.g. "ollama serve" in a terminal): read the children's command lines
-  // from Windows instead. Only when the set of loaded models changes, so it stays rare.
+  // No log (e.g. "ollama serve" in a terminal): read the children's command lines from the
+  // OS instead. Only when the set of loaded models changes, so it stays rare.
   function scanProcesses() {
+    if (process.platform === "linux") {      // /proc/<pid>/cmdline, NUL-separated, readable by everyone
+      for (const pid of fs.readdirSync("/proc").filter((d) => /^\d+$/.test(d))) {
+        let cmd;
+        try { cmd = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8"); } catch { continue; }
+        if (!cmd.includes("llama-server") || !/ollama/i.test(cmd)) continue;
+        const x = parseCmd(cmd.split("\0").join(" "));
+        if (x) launches.set(x.hash, x);
+      }
+      return;
+    }
     if (process.platform !== "win32") return;
     const ps = `Get-CimInstance Win32_Process -Filter "Name='llama-server.exe'" | ForEach-Object { $_.CommandLine }`;
     execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], { windowsHide: true, timeout: 15_000 }, (e, out) => {
@@ -100,7 +151,7 @@ export function create({ env, addTokens }) {
 
   async function poll() {
     const ps = (await getJSON(`${url}/api/ps`)).models || [];
-    if (readLog && !scanned) scanBack();
+    if (logFile && !scanned) scanBack();
     const lines = readLog ? readLog() : null;
     const tokenLines = [];
     for (const l of lines || []) {
@@ -110,7 +161,8 @@ export function create({ env, addTokens }) {
     }
     const useLog = lines != null;
     const sig = ps.map((m) => m.name + m.digest).join();
-    if (!useLog && sig !== psSig && ps.length) scanProcesses();
+    // /proc is cheap: always look on Linux; Windows needs PowerShell, so only without a log.
+    if (sig !== psSig && ps.length && (!useLog || process.platform === "linux")) scanProcesses();
     psSig = sig;
     const now = Date.now(), dt = (now - (last.t || now)) / 1000;
     const prev = new Map(last.models.map((m) => [m.id, m]));
@@ -143,7 +195,9 @@ export function create({ env, addTokens }) {
     for (const m of models) delete m.child;
     last = { t: now, models };
     const note = noChild.length && useLog ?`no token counts for ${noChild.join(", ")} (not run by llama-server)`
-      : ps.length && !useLog ? "server.log not found: token counts from /slots, close but not exact" : undefined;
+      : ps.length && !useLog ? (useJournal
+        ? "no access to Ollama's journal (add your user to the systemd-journal group): token counts from /slots, close but not exact"
+        : "server.log not found: token counts from /slots, close but not exact") : undefined;
     return { models, tokenSource: useLog ? "log" : ps.length ? "slots" : "none", note };
   }
 
@@ -166,5 +220,5 @@ export function create({ env, addTokens }) {
     return { mode: "ollama", models: out };
   }
 
-  return { name, url, poll, setup };
+  return { name, url, poll, setup, stop: () => readLog?.stop?.() };
 }

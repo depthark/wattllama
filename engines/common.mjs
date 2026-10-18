@@ -64,7 +64,7 @@ export function slotPoller() {
       const dec = nt?.n_decoded ?? 0;
       const st = state.get(s.id);
       if (s.is_processing && st && st.task === s.id_task) gen += Math.max(0, dec - st.dec);
-      else if (s.is_processing && st) { gen += dec; req++; }
+      else if (s.is_processing) { gen += dec; req++; }       // a new request, or a server seen for the first time
       state.set(s.id, { task: s.id_task, dec });
       if (s.is_processing) processing = true;
     }
