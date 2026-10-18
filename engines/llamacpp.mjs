@@ -8,8 +8,7 @@
 // In router mode only models that are already loaded are asked, because
 // /slots?model=X on an unloaded model would make the router load it.
 
-import path from "node:path";
-import { getJSON, tail, parseLlamaLine, slotPoller, rate, argPairs } from "./common.mjs";
+import { getJSON, tail, parseLlamaLine, slotPoller, rate, argPairs, baseName } from "./common.mjs";
 
 export const name = "llama.cpp";
 
@@ -109,7 +108,7 @@ export function create({ env, addTokens }) {
     }
     const p = await getJSON(`${url}/props`, { headers }).catch(() => ({}));
     return { mode: "server", models: [{ id: data[0]?.id, status: "loaded", kind: kind(data[0]),
-      args: [["model", path.basename(p.model_path || "")], ["ctx-size", p.default_generation_settings?.n_ctx],
+      args: [["model", baseName(p.model_path || "")], ["ctx-size", p.default_generation_settings?.n_ctx],
         ["build", p.build_info]].filter((x) => x[1]),
       ctxTrain: data[0]?.meta?.n_ctx_train, params: data[0]?.meta?.n_params, size: data[0]?.meta?.size }] };
   }

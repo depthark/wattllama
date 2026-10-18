@@ -1,7 +1,6 @@
 // Shared helpers for engine adapters. See CONTRIBUTING.md for the adapter interface.
 
 import fs from "node:fs";
-import path from "node:path";
 
 export async function getJSON(url, { headers = {}, ms = 3000, method = "GET", body } = {}) {
   const r = await fetch(url, { method, headers, body, signal: AbortSignal.timeout(ms) });
@@ -83,7 +82,9 @@ export function rate(prev, processing, tokens, dt) {
 // Command-line flags -> [["flag", "value"], ...] for display. Plumbing flags are left out,
 // secrets (--api-key, tokens, TLS keys) are masked and paths shortened to the file name,
 // so the page never shows a credential or your folder layout.
-const SECRET_ARG = /key|token|secret|password|passwd|auth|cred/i;
+// The file name of a Windows or POSIX path on any OS (path.basename on Linux keeps "C:\Users\...").
+export const baseName = (p) => String(p).split(/[\\/]/).filter(Boolean).pop() || "";
+const SECRET_ARG =/key|token|secret|password|passwd|auth|cred/i;
 const SKIP_ARG = new Set(["host", "port", "alias", "log-colors", "no-log-prefix", "no-log-timestamps", "log-verbosity"]);
 export function argPairs(a) {
   const out = [];
@@ -93,7 +94,7 @@ export function argPairs(a) {
     const k = s.replace(/^--?/, "");
     const v = a[i + 1] != null && !/^--?[a-z]/i.test(String(a[i + 1])) ? String(a[++i]) : "";
     if (SKIP_ARG.has(k)) continue;
-    out.push([k, SECRET_ARG.test(k) ? (v ? "••••" : "") : /[\\/]/.test(v) ? path.basename(v) : v]);
+    out.push([k, SECRET_ARG.test(k) ? (v ? "••••" : "") : /[\\/]/.test(v) ? baseName(v) : v]);
   }
   return out;
 }

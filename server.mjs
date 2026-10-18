@@ -1,9 +1,9 @@
-// WattLlama: what your Windows PC draws, how much energy it used over time,
+// WattLlama: what your PC (Windows or Linux) draws, how much energy it used over time,
 // and how much of that went into local LLM generation.
 //
 // Every 2 s, with no drivers and no admin rights:
 //   GPU      nvidia-smi (streaming), measured watts / temperature / VRAM, every NVIDIA card
-//   CPU+RAM  Windows "Energy Meter" (RAPL) counters via sampler.ps1, measured watts;
+//   CPU+RAM  RAPL energy counters (Windows "Energy Meter" / Linux powercap), measured watts;
 //            without them, an estimate from CPU utilisation (DASH_CPU_MAX_W)
 //   rest     motherboard, disks, fans: DASH_REST_W, then the PSU loss (DASH_PSU_EFF)
 //   LLM      llama.cpp and other engines (engines/): is it generating, how many tokens
@@ -17,6 +17,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ENGINES } from "./engines/index.mjs";
+// Everything that differs between Windows and Linux lives in platform/.
+const PLATFORM = await import(process.platform === "win32" ? "./platform/windows.mjs" : "./platform/linux.mjs");
 
 const [major, minor] = process.versions.node.split(".").map(Number);
 if (major < 22 || (major === 22 && minor < 13)) {
@@ -127,11 +129,7 @@ stream("nvidia-smi", "nvidia-smi", [
     safeMin: safeFloor(num(f[12]), num(f[11])) });
 }, { giveUpOnMissing: true });
 
-stream("sampler", "powershell.exe", [
-  "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(DIR, "sampler.ps1"),
-  "-IntervalMs", String(CFG.intervalMs),
-], (line) => {
-  const [pkg, dram, util, mhz, zone, diskR, diskW] = line.split(",").map(num);
+PLATFORM.startCpuSampler({ intervalMs: CFG.intervalMs, dir: DIR, stream, num, onSample: ({ pkg, dram, util, mhz, zone, diskR, diskW }) => {
   if (util == null && pkg == null) return;
   const u = Math.min(util ?? 0, 100);
   const measured = pkg != null;
@@ -139,7 +137,7 @@ stream("sampler", "powershell.exe", [
   const pkgW = measured ? pkg : CFG.cpuMaxW * (0.15 + 0.85 * u / 100);
   live.cpu = { t: Date.now(), pkgW, dramW: dram ?? 0, util: u, mhz, zoneC: zone != null && zone > 0 && zone < 120 ? zone : null,
     diskR, diskW, measured };
-});
+} });
 
 // Optional: LibreHardwareMonitor's web server (Options > Remote Web Server) has what
 // Windows does not give without a driver: CPU core temperatures, fans, motherboard,
@@ -205,6 +203,17 @@ function lhmGpus(gpuHw) {
   return out;
 }
 if (LHM_URL) setInterval(pollLHM, 5000);
+
+// Linux reads the same kind of sensors natively (hwmon), every 5 s, unless LHM is configured.
+const NATIVE_SENSORS = !LHM_URL && PLATFORM.readSensors;
+async function pollNative() {
+  try {
+    const r = await PLATFORM.readSensors();
+    live.lhm = { t: Date.now(), cpuTemp: r.cpuTemp, groups: r.groups, count: r.groups.reduce((a, g) => a + g.sensors.length, 0) };
+    live.lhmGpus = r.gpus;
+  } catch (e) { log("sensors", e.message); }
+}
+if (NATIVE_SENSORS) { pollNative(); setInterval(pollNative, 5000); }
 
 function gpuTotals(now) {
   let power = 0, temp = null, vramUsed = 0, vramTotal = 0, util = 0, n = 0, limit = 0, fan = null;
@@ -555,7 +564,8 @@ function liveView() {
     ram: { used: os.totalmem() - os.freemem(), total: os.totalmem() },
     disk: fresh(c) ? { read: c.diskR, write: c.diskW } : null,
     sensors: fresh(live.lhm) ? live.lhm.groups : null,
-    lhm: LHM_URL ? (fresh(live.lhm) ? "ok" : "unreachable") : "off",
+    lhm: LHM_URL ? (fresh(live.lhm) ? "ok" : "unreachable") : NATIVE_SENSORS ? "native" : "off",
+    platform: PLATFORM.name,
     control: CONTROL,
     llm: engines.length ? live.llm : null,
   };
@@ -618,9 +628,7 @@ async function piSetup() {
 
 async function tasksSetup() {
   if (!taskPatterns) return null;
-  const out = await run$("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
-    path.join(DIR, "tasks.ps1"), "-Patterns", taskPatterns]);
-  return JSON.parse(out || "[]");
+  return PLATFORM.scheduledTasks(taskPatterns, { run$, dir: DIR });
 }
 
 async function setup() {
@@ -639,8 +647,6 @@ const VERSION = readJSON(path.join(DIR, "package.json"))?.version || "dev";
 const engineOf = new Map();          // model -> engine name, learnt while it is loaded
 function share() {
   for (const m of live.llm.models || []) engineOf.set(m.id, m.engine);
-  const rel = os.release().split(".").map(Number);
-  const winName = rel[0] === 10 ? (rel[2] >= 22000 ? "Windows 11" : "Windows 10") : `Windows ${os.release()}`;
   const gpus = [...live.gpus.values(), ...live.lhmGpus].map((g) => g.name);
   const models = db.prepare(`SELECT mm.model, SUM(mm.gen_tok) gen, SUM(mm.active_s) act, SUM(mm.wh) wh,
       SUM(m.gpu_pl * mm.active_s) / NULLIF(SUM(CASE WHEN m.gpu_pl IS NULL THEN 0 ELSE mm.active_s END), 0) pl
@@ -649,7 +655,7 @@ function share() {
       quant: r.model.match(/(?:^|[-_.:])((?:UD-)?(?:IQ\d_[A-Z0-9_]+|Q\d(?:_[A-Z0-9]+)*|F16|BF16|FP16|MXFP4|\d-?bit))(?=$|[-_.:])/i)?.[1] || "",
       tokens: r.gen, tokPerS: r.act > 0 ? r.gen / r.act : null, whPer1k: r.wh / (r.gen / 1000),
       powerLimit: r.pl ? Math.round(r.pl) : null }));
-  return { version: VERSION, os: winName, cpu: os.cpus()[0]?.model.trim().replace(/\s+/g, " ") || "",
+  return { version: VERSION, os: PLATFORM.osName(), cpu: os.cpus()[0]?.model.trim().replace(/\s+/g, " ") || "",
     ramGB: Math.round(os.totalmem() / 1073741824), gpus, psuEff: CFG.psuEff, restW: CFG.restW, models };
 }
 
@@ -716,7 +722,7 @@ const CONTROL = process.env.DASH_ALLOW_POWER_LIMIT === "1";
 // The only thing WattLlama can change, off unless DASH_ALLOW_POWER_LIMIT=1: the NVIDIA
 // power limit (what undervolting videos use to get the same speed for less power).
 // Accepted only from this PC, only from WattLlama's own page, only within the card's
-// own min..max, and Windows still asks you in a UAC prompt. Resets at reboot.
+// own min..max, and the OS still asks you (UAC on Windows, polkit on Linux). Resets at reboot.
 let controlBusy = false;
 const isLoopback = (a) => a === "127.0.0.1" || a === "::1" || a === "::ffff:127.0.0.1";
 
@@ -743,13 +749,13 @@ async function setPowerLimit(req) {
   if (!Number.isInteger(index) || index < 0) return [400, { error: "Bad GPU index." }];
   controlBusy = true;
   try {
-    // Numbers only, validated above; nvidia-smi -pl needs admin, hence the UAC prompt.
-    const ps = `$p = Start-Process -FilePath nvidia-smi -ArgumentList '-i','${index}','-pl','${watts}' -Verb RunAs -WindowStyle Hidden -Wait -PassThru; exit $p.ExitCode`;
+    // Numbers only, validated above; nvidia-smi -pl needs admin rights.
+    const [cmd, args] = PLATFORM.powerLimitCommand(index, watts);
     let code = 0;
-    try { await run$("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], { timeout: 120_000 }); }
+    try { await run$(cmd, args, { timeout: 120_000 }); }
     catch (e) { code = e.code ?? 1; }
     log(`power limit GPU ${index} -> ${watts} W: ${code === 0 ? "done" : "cancelled or failed"}`);
-    return code === 0 ? [200, { ok: true, gpu: index, watts }] : [409, { error: "Cancelled in the UAC prompt, or nvidia-smi refused." }];
+    return code === 0 ? [200, { ok: true, gpu: index, watts }] : [409, { error: `Cancelled in ${PLATFORM.elevation}, or nvidia-smi refused.` }];
   } finally { controlBusy = false; }
 }
 const extraHosts = (process.env.DASH_ALLOWED_HOSTS || "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);

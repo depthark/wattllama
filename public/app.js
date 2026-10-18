@@ -65,7 +65,7 @@ async function refreshSummary() {
   $("actToday").textContent = `${dur(t.act)} · prefill ${nf(t.pp)}`;
   $("whk").textContent = a.gen > 0 ? energy(a.wha / (a.gen / 1000)) : "–";
   $("per1m").textContent = a.gen > 0 ? energy(a.wha / (a.gen / 1e6)) : "–";
-  $("foot").textContent = `GPU (nvidia-smi; AMD / Intel via LibreHardwareMonitor) and CPU + RAM (Windows Energy Meter / RAPL) are measured; the rest of the PC is an estimate of ${S.restW} W `
+  $("foot").textContent = `GPU (nvidia-smi; AMD / Intel via LibreHardwareMonitor or Linux hwmon) and CPU + RAM (RAPL energy counters) are measured; the rest of the PC is an estimate of ${S.restW} W `
     + `and the power supply ${Math.round(S.psuEff * 100)} % efficient. The monitor is not included. Data since ${S.first ? new Date(S.first).toLocaleString() : "now"}.`;
 }
 
@@ -182,7 +182,7 @@ function renderHardware(L) {
       ${g.limitMin != null ? `<div class="pl">
         <div class="row"><span>power limit</span><span><b id="plv${esc(g.index)}">${pl} W</b> <span class="muted">(${g.safeMin}–${Math.round(g.limitMax)}, default ${Math.round(g.limitDefault)})</span></span></div>
         ${hwControl ? `<input type="range" min="${g.safeMin}" max="${Math.floor(g.limitMax)}" step="5" value="${pl}" data-gpu="${esc(g.index)}" class="plr">
-        <div class="hd"><button class="theme" data-apply="${esc(g.index)}">Apply (asks UAC)</button><button class="theme" data-reset="${esc(g.index)}">Reset to default</button><span class="muted" id="plmsg${esc(g.index)}"></span></div>`
+        <div class="hd"><button class="theme" data-apply="${esc(g.index)}">Apply (asks ${L.platform === "linux" ? "password" : "UAC"})</button><button class="theme" data-reset="${esc(g.index)}">Reset to default</button><span class="muted" id="plmsg${esc(g.index)}"></span></div>`
         : `<div class="muted" style="font-size:12px">Control is off. Set DASH_ALLOW_POWER_LIMIT=1 to change it from here.</div>`}
       </div>` : ""}
     </div>`);
@@ -194,7 +194,7 @@ function renderHardware(L) {
       <div class="row"><span>RAM power</span><span>${c.dram ? `${c.dram.toFixed(1)} W` : "–"}</span></div>
       <div class="row"><span>load</span><span>${Math.round(c.util)} %</span></div>${bar(c.util, 100, "--cpu")}
       <div class="row"><span>effective clock</span><span>${c.mhz ? `${Math.round(c.mhz)} MHz` : "–"}</span></div>
-      <div class="row"><span>temperature</span><span>${c.temp != null ? `${Math.round(c.temp)} °C` : L.lhm === "off" ? '<span class="muted">see More sensors</span>' : '<span class="muted">LHM not reachable</span>'}</span></div>
+      <div class="row"><span>temperature</span><span>${c.temp != null ? `${Math.round(c.temp)} °C` : L.lhm === "off" ? '<span class="muted">see More sensors</span>' : L.lhm === "native" ? '<span class="muted">no sensor</span>' : '<span class="muted">LHM not reachable</span>'}</span></div>
       ${c.zoneC != null ? `<div class="row"><span>ACPI thermal zone</span><span>${c.zoneC.toFixed(0)} °C</span></div>` : ""}
     </div>`);
   }
@@ -224,7 +224,7 @@ $("hw").addEventListener("click", async (e) => {
   const b = e.target.closest("button[data-apply],button[data-reset]"); if (!b) return;
   const gpu = b.dataset.apply ?? b.dataset.reset, msg = $(`plmsg${gpu}`);
   const body = b.dataset.reset != null ? { gpu, reset: true } : { gpu, watts: plDraft[gpu] };
-  msg.textContent = "confirm the UAC prompt…"; b.disabled = true;
+  msg.textContent = "confirm the prompt…"; b.disabled = true;
   try {
     const r = await fetch("api/gpu/power-limit", { method: "POST", headers: { "content-type": "application/json", "x-wattllama": "1" }, body: JSON.stringify(body) });
     const j = await r.json();
