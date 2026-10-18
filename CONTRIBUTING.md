@@ -1,6 +1,7 @@
 # Contributing to WattLlama
 
-Thanks for helping! The most useful contributions right now:
+Thanks for helping! How the code fits together and the rules it keeps are in [AGENTS.md](AGENTS.md)
+(written for AI coding agents, useful for everyone). The most useful contributions right now:
 
 1. **Share a result** from your PC, so [RESULTS.md](RESULTS.md) grows ([how](RESULTS.md)). No code needed.
 2. **Confirm hardware.** Run WattLlama on an AMD Radeon or Intel Arc GPU (via LibreHardwareMonitor), an

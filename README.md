@@ -74,8 +74,9 @@ so every client that talks to it is counted.
 
 ## Install
 
-Requirements: [Node.js](https://nodejs.org) 22.13 or newer. A GPU and an inference engine are optional;
-without them you get CPU and system power only.
+Requirements: [Git](https://git-scm.com) and [Node.js](https://nodejs.org) 22.13 or newer
+(`node --version` to check). A GPU and an inference engine are optional; without them you get CPU and
+system power only.
 
 **Windows** 10 (1809+) or 11 (`winget install OpenJS.NodeJS.LTS` for Node.js):
 
@@ -102,8 +103,37 @@ user service on Linux (`journalctl --user -u wattllama` for its log). Then it op
 Just want to look first? `node server.mjs --demo` serves the page with 14 days of sample history
 (in memory, nothing saved).
 
-Uninstall: `.\uninstall.ps1` / `./uninstall.sh`; your history in `data/` is kept unless you add
-`-RemoveData` / `--remove-data`.
+### Update
+
+```powershell
+# Windows, in the wattllama folder
+git pull
+Stop-ScheduledTask WattLlama; Start-ScheduledTask WattLlama
+```
+
+```bash
+# Linux, in the wattllama folder
+git pull && ./install.sh --no-open
+```
+
+Your `.env` and history stay as they are. New settings are optional; `.env.example` lists them all.
+
+### Uninstall
+
+`.\uninstall.ps1` on Windows, `./uninstall.sh` on Linux. It removes the autostart, the firewall rule
+and (Linux) the RAPL helper. Your history in `data/` is kept unless you add `-RemoveData` /
+`--remove-data`; then delete the folder.
+
+### Troubleshooting
+
+| Problem | What to do |
+|---|---|
+| Page does not open | Is it running? Windows: `Get-ScheduledTask WattLlama`, log in `data\wattllama.log`. Linux: `systemctl --user status wattllama`, `journalctl --user -u wattllama` |
+| "port 8091 is in use" in the log | Set another `DASH_PORT` in `.env` and restart |
+| CPU power says "(est.)" | Windows exposes no Energy Meter on this CPU, or on Linux the `--rapl` helper is not installed. Set `DASH_CPU_MAX_W` to your CPU's power for a better estimate |
+| No GPU card | NVIDIA: is `nvidia-smi` on the PATH? AMD / Intel: Linux reads them itself; on Windows run LibreHardwareMonitor |
+| No models or tokens | Is the engine running on its default port? See [Connect your engine](#connect-your-engine); the page shows a note when counts are limited |
+| Settings have no effect | Restart WattLlama after editing `.env`. If a setting appears twice, the last line wins |
 
 ### Linux: CPU and RAM power (`--rapl`)
 
@@ -195,6 +225,11 @@ Then run your usual prompts at a few limits and read the *Efficiency by GPU powe
 On Linux the NVIDIA driver supports power limits as on Windows (what it does not support is
 undervolting, which WattLlama never does). Some laptop GPUs have a fixed limit; then no slider is
 shown. Under WSL the limit cannot be changed at all.
+
+> **Linux status:** the request goes through `pkexec`, which needs a polkit agent in your desktop
+> session. It is not yet confirmed on real hardware that this works from the background service; if
+> the page answers "Cancelled in the password prompt", use `sudo nvidia-smi -pl <watts>` meanwhile and
+> tell us in [#5](https://github.com/depthark/wattllama/issues/5).
 
 ## How it measures
 
@@ -288,7 +323,7 @@ Everything lives in `.env` (see [.env.example](.env.example)); all settings are 
 
 Help is very welcome, and much of it needs no code: **share a result** from your PC, or **report how
 it measures** on an AMD / Intel GPU, an AMD CPU or a laptop. New engines are one file each.
-Everything is in [CONTRIBUTING.md](CONTRIBUTING.md); look for
+Everything is in [CONTRIBUTING.md](CONTRIBUTING.md) (how the code works and its rules: [AGENTS.md](AGENTS.md)); look for
 [`good first issue`](https://github.com/depthark/wattllama/labels/good%20first%20issue).
 
 ## License
