@@ -267,6 +267,21 @@ month. Export it as CSV from the links next to the chart ranges, or as a report 
 | Grafana + exporters | with work | ✅ | ✅ | services | 3+ services |
 | LM Studio / Ollama / llama.cpp UIs | tok/s per message | ❌ | ❌ | ✅ | built in |
 
+Tools that also connect energy and tokens (checked against their own documentation, October 2026):
+
+| | Energy per token | Counts | History | Engines | Platforms | Setup |
+|---|---|---|---|---|---|---|
+| **WattLlama** | ✅ Wh / 1k tokens, per model and run | **whole PC**: GPU + CPU + RAM measured, rest estimated | ✅ minutes, reports, heatmap | llama.cpp, Ollama, LM Studio | Windows, Linux | one script, no dependencies |
+| [InferenceInquire](https://github.com/nisesen/llamacpp-dashboard) | ✅ Wh / 1k tokens, cost | GPU | ✅ 2 years, alerts | llama.cpp | agent on Linux (NVIDIA); dashboard in Docker anywhere | Docker Compose |
+| [llmtop](https://github.com/ProgrammerPeasant/llmtop) | ✅ J / token, API-cost equivalent | GPU (NVML) | session | Ollama (llama.cpp planned) | Linux, Windows | `cargo install`, a proxy in front of Ollama |
+| [otop](https://github.com/TiniLLM/ollama-token-monitor) | ❌ tok/s only | – | ❌ | Ollama | macOS (Apple GPU); Linux without GPU panel | Python, a proxy in front of Ollama |
+| [MELODI](https://github.com/ejhusom/MELODI) | ✅ per prompt | GPU + CPU (RAPL, scaphandre) | experiment data | Ollama | Linux | research scripts |
+
+If you run llama.cpp on a Linux GPU server, InferenceInquire is excellent, with alerts and deep
+llama.cpp internals. WattLlama is for the PC you sit at: it counts the whole machine, not just the
+GPU (with CPU-offloaded MoE experts, the CPU is a big part of the bill), follows three engines at
+once, needs no Docker or proxy, and runs on Windows without admin rights.
+
 WattLlama does not replace a hardware monitor; it connects the watts to the tokens.
 
 ## Security
