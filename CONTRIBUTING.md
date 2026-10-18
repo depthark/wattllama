@@ -14,9 +14,11 @@ Thanks for helping! The most useful contributions right now:
 
 These are what WattLlama promises its users, so every change has to keep them:
 
-- **Zero npm dependencies.** Node.js built-ins and Windows' own tools only. CI fails otherwise.
+- **Zero npm dependencies.** Node.js built-ins and the OS's own tools only. CI fails otherwise.
 - **It is a monitor.** No measurable effect on generation speed: no polling faster than every 2 s,
   nothing that runs PowerShell or another process per poll, back off when an engine is not running.
+- **Windows and Linux alike.** OS-specific code lives in `platform/windows.mjs` and `platform/linux.mjs`;
+  CI runs everything on both.
 - **Read-only and local.** Nothing leaves the PC. No new write endpoints; the GPU power limit is the
   single, guarded exception.
 - **Never show secrets or paths.** API keys and tokens are masked, folders are cut to file names,
@@ -26,7 +28,7 @@ These are what WattLlama promises its users, so every change has to keep them:
 
 ## Develop
 
-```powershell
+```bash
 git clone https://github.com/depthark/wattllama
 cd wattllama
 node server.mjs --demo     # 14 days of sample history in memory, http://127.0.0.1:8091

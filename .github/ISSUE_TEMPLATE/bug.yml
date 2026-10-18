@@ -11,7 +11,7 @@ body:
     attributes: { label: WattLlama version, description: "From package.json or the Share your result box" }
   - type: input
     id: windows
-    attributes: { label: Windows version, placeholder: "Windows 11 23H2" }
+    attributes: { label: OS and version, placeholder: "Windows 11 23H2 / Ubuntu 24.04" }
   - type: input
     id: hardware
     attributes: { label: GPU / CPU }

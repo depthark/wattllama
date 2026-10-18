@@ -1,5 +1,5 @@
 name: Hardware report
-description: Tell us how WattLlama measures on your PC (AMD / Intel GPUs, AMD CPUs, laptops, multi-GPU)
+description: Tell us how WattLlama measures on your PC (Linux, AMD / Intel GPUs, AMD CPUs, laptops, multi-GPU)
 labels: ["hardware"]
 body:
   - type: markdown

@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>How many watts does your local LLM really burn?</b><br>
-  A live power, temperature and energy-per-token dashboard for Windows PCs running
+  A live power, temperature and energy-per-token dashboard for <b>Windows and Linux</b> PCs running
   <b>llama.cpp</b>, <b>Ollama</b> or <b>LM Studio</b>.<br>
   No drivers, no admin rights, no Docker, no npm packages. One small Node.js process.
 </p>
@@ -14,6 +14,7 @@
 <p align="center">
   <a href="https://github.com/depthark/wattllama/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/depthark/wattllama/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Windows 10/11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4">
+  <img alt="Linux" src="https://img.shields.io/badge/Linux-systemd-FCC624">
   <img alt="Node.js 22.13+" src="https://img.shields.io/badge/Node.js-22.13%2B-339933">
   <img alt="Engines" src="https://img.shields.io/badge/engines-llama.cpp%20%7C%20Ollama%20%7C%20LM%20Studio-ffd23f">
   <img alt="0 dependencies" src="https://img.shields.io/badge/dependencies-0-2ee6d6">
@@ -55,7 +56,8 @@ so every client that talks to it is counted.
 | 🧾 **Reports** | This month, last month, last 7 / 30 days, this or last year: per day and per model, as CSV or print / PDF |
 | 💶 **Cost (optional)** | Set your price per kWh and currency to see money next to every kWh; off by default |
 | 📤 **CSV export** | Minutes, per-model minutes and runs, for your own spreadsheets |
-| 🌓 **Light & dark** | Follows Windows, or pick one |
+| 🐧 **Windows and Linux** | Same page, same numbers; on Linux the sensors (CPU temperatures, fans, AMD / Intel GPUs) need no extra software |
+| 🌓 **Light & dark** | Follows the system, or pick one |
 | 🪶 **Featherweight** | Measured: **0.02 % CPU, ~150 MB RAM** in total; generation speed unchanged (54–60 tok/s with and without it) |
 
 <details>
@@ -72,9 +74,10 @@ so every client that talks to it is counted.
 
 ## Install
 
-Requirements: Windows 10 (1809+) or 11, [Node.js](https://nodejs.org) 22.13 or newer
-(`winget install OpenJS.NodeJS.LTS`). A GPU and an inference engine are optional; without them you
-get CPU and system power only.
+Requirements: [Node.js](https://nodejs.org) 22.13 or newer. A GPU and an inference engine are optional;
+without them you get CPU and system power only.
+
+**Windows** 10 (1809+) or 11 (`winget install OpenJS.NodeJS.LTS` for Node.js):
 
 ```powershell
 git clone https://github.com/depthark/wattllama
@@ -82,14 +85,36 @@ cd wattllama
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
+**Linux** with systemd (Ubuntu, Debian, Fedora, Arch, …; Node.js from your distribution if it is new
+enough, [nodejs.org](https://nodejs.org) or nvm):
+
+```bash
+git clone https://github.com/depthark/wattllama
+cd wattllama
+./install.sh            # add --rapl to measure CPU + RAM power, see below
+```
+
 The installer checks what your PC can measure and which engines are running, creates `.env`,
-registers a scheduled task that starts WattLlama when you log in (current user, no admin), and
-opens **http://127.0.0.1:8091**.
+and makes WattLlama start when you log in, as your own user: a scheduled task on Windows, a systemd
+user service on Linux (`journalctl --user -u wattllama` for its log). Then it opens
+**http://127.0.0.1:8091**.
 
 Just want to look first? `node server.mjs --demo` serves the page with 14 days of sample history
 (in memory, nothing saved).
 
-Uninstall: `.\uninstall.ps1` (keeps your history in `data\`; add `-RemoveData` to delete it).
+Uninstall: `.\uninstall.ps1` / `./uninstall.sh`; your history in `data/` is kept unless you add
+`-RemoveData` / `--remove-data`.
+
+### Linux: CPU and RAM power (`--rapl`)
+
+CPU package and RAM watts come from the CPU's RAPL energy counters. Since Linux 5.10 only root may read
+them, because reading them thousands of times a second can leak secrets through power side channels
+([CVE-2020-8694](https://platypusattack.com/)). WattLlama never runs as root. Instead,
+`./install.sh --rapl` (asks for sudo once) installs a tiny root helper that publishes a **2-second
+average rounded to 0.1 W** in `/run/wattllama/rapl`, far too coarse for that attack and all WattLlama
+needs. It runs under a locked-down systemd unit: no capabilities, no network, read-only system,
+system-call filter (`systemd-analyze security` rates it 1.0, "OK"). Without it, CPU power is
+estimated from load and marked "(est.)". `./uninstall.sh` removes it.
 
 ## Connect your engine
 
@@ -99,7 +124,7 @@ nothing; it is asked again every 10 s and appears when you start it.
 | Engine | Found at | Tokens | Generating now |
 |---|---|---|---|
 | **llama.cpp** `llama-server`, router too | `DASH_LLAMA_URL` (:8080) | exact from its log (`DASH_LLAMA_LOG`) or `--metrics`; else `/slots` (close) | `/slots` |
-| **Ollama** (the app or `ollama serve`) | `OLLAMA_HOST` or :11434 | exact from `%LOCALAPPDATA%\Ollama\server.log`; else `/slots` (close) | the model's llama-server `/slots` |
+| **Ollama** (the app, the service or `ollama serve`) | `OLLAMA_HOST` or :11434 | exact from its log (Windows: `server.log`, Linux: the systemd journal); else `/slots` (close) | the model's llama-server `/slots` |
 | **LM Studio** (Developer → Start server) | `DASH_LMSTUDIO_URL` (:1234) | exact, LM Studio's own stats via `lms log stream` | each prediction's exact duration, counted when it ends |
 
 <details>
@@ -112,12 +137,15 @@ set `DASH_LLAMA_API_KEY`. WattLlama never asks the router about a model that is 
 that would load it.
 
 **Ollama.** Recent Ollama (tested with 0.40.6) runs each model as an upstream llama-server process and writes its
-output to `server.log`, which gives the same exact counts. The **prefill** column counts tokens that
+output to its log, which gives the same exact counts: `%LOCALAPPDATA%\Ollama\server.log` on Windows, the
+`ollama` service's journal on Linux. Reading the journal needs your user in the `systemd-journal` group
+(`sudo usermod -aG systemd-journal $USER`, then log in again); without it, counts come from `/slots`
+and the page says so. The **prefill** column counts tokens that
 were actually computed; prompt-cache hits are not counted (Ollama's `prompt_eval_count` includes them).
 Models served by another Ollama runner show as loaded, without token counts.
 
 **LM Studio.** Token counts need the `lms` CLI, which LM Studio installs in
-`%USERPROFILE%\.lmstudio\bin`. WattLlama starts `lms log stream` only while the server answers and
+`~/.lmstudio/bin` (`%USERPROFILE%\.lmstudio\bin` on Windows). WattLlama starts `lms log stream` only while the server answers and
 always with an explicit port, so it never launches LM Studio. Prompts and replies pass through that
 stream; WattLlama reads only the model name and the numbers, and never stores, logs or shows text.
 LM Studio reports a prediction only when it is finished, so its busy time is counted from its exact
@@ -131,16 +159,21 @@ see [CONTRIBUTING.md](CONTRIBUTING.md#adding-an-engine).
 ### Phone / other devices
 
 ```powershell
-.\install.ps1 -AllowLan
+.\install.ps1 -AllowLan        # Windows
+./install.sh --allow-lan      # Linux
 ```
 
-Serves on your network, adds a firewall rule for private networks only, and sets a random access
-token. It prints a link to open once on the phone. Handy because a browser tab on the same PC
+Serves on your network, adds a firewall rule for private networks only (Windows Firewall, or ufw on
+Linux; for firewalld the installer prints the command), and sets a random access token. It prints a link to open once on the phone. Handy because a browser tab on the same PC
 uses some VRAM, which matters when the model fills the card.
 
 ### CPU temperatures, fans, SSDs, AMD and Intel GPUs
 
-Windows has no driver-free way to read CPU core temperatures, or the power of AMD and Intel GPUs. Run
+**Linux** reads all of them from the kernel (`/sys/class/hwmon`) with no extra software: CPU, NVMe and
+motherboard temperatures, fans, and the power, load, VRAM and clocks of discrete AMD Radeon and Intel Arc
+cards.
+
+**Windows** has no driver-free way to read CPU core temperatures, or the power of AMD and Intel GPUs. Run
 [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor), enable
 *Options → Remote Web Server → Run*, and set `DASH_LHM_URL=http://127.0.0.1:8085`. Every temperature
 and fan it sees shows up, CPU temperature joins the history chart, and discrete Radeon and Arc cards
@@ -153,20 +186,25 @@ Off by default. With `DASH_ALLOW_POWER_LIMIT=1` each NVIDIA card gets a slider:
 
 - only from the PC itself (not from the network), only from WattLlama's own page;
 - only between **60 % of the card's default** and its maximum, inside the range NVIDIA's driver allows;
-- Windows asks you in a **UAC prompt** every time;
+- the OS asks you every time: a **UAC prompt** on Windows, a **password prompt** (polkit) on Linux;
 - it is a power cap, **not an undervolt**: it cannot make the PC unstable, worst case the card is slower;
 - it **resets on reboot**.
 
 Then run your usual prompts at a few limits and read the *Efficiency by GPU power limit* table.
+
+On Linux the NVIDIA driver supports power limits as on Windows (what it does not support is
+undervolting, which WattLlama never does). Some laptop GPUs have a fixed limit; then no slider is
+shown. Under WSL the limit cannot be changed at all.
 
 ## How it measures
 
 | What | Source | Accuracy |
 |---|---|---|
 | NVIDIA GPU power, temperature, clocks, VRAM, throttle reasons | `nvidia-smi` streaming every 2 s, one process | measured |
-| AMD / Intel Arc GPU power, temperature, load, VRAM | LibreHardwareMonitor (optional) | measured |
-| CPU package and RAM power | Windows *Energy Meter* (RAPL) counters where Windows exposes them (most Intel desktop CPUs), read through the PDH API with English counter names, so any Windows display language works | measured |
-| CPU load, effective clock, disk I/O, ACPI zone | Windows performance counters | measured |
+| AMD / Intel Arc GPU power, temperature, load, VRAM | Linux: hwmon. Windows: LibreHardwareMonitor (optional) | measured |
+| CPU package and RAM power | RAPL energy counters. Windows: *Energy Meter* performance counters where Windows exposes them (most Intel desktop CPUs), read through the PDH API with English counter names, so any display language works. Linux: powercap, through the `--rapl` helper | measured |
+| CPU load, effective clock, disk I/O, ACPI zone | Windows performance counters / Linux `/proc` and `/sys`, read in-process | measured |
+| CPU, SSD, motherboard temperatures, fans | Linux: hwmon. Windows: LibreHardwareMonitor (optional) | measured |
 | Rest of the PC (motherboard, disks, fans) | `DASH_REST_W` (35 W) | estimate |
 | Power supply loss | divided by `DASH_PSU_EFF` (0.88) | estimate |
 | Monitor | not counted | |
@@ -182,9 +220,9 @@ month. Export it as CSV from the links next to the chart ranges, or as a report 
 
 ## Compared with popular tools
 
-| | LLM tokens & energy per token | Power history (kWh) | GPU + CPU sensors | Windows, no admin | Setup |
+| | LLM tokens & energy per token | Power history (kWh) | GPU + CPU sensors | Runs without admin / root | Setup |
 |---|---|---|---|---|---|
-| **WattLlama** | ✅ per model, per run, 3 engines | ✅ | ✅ (+ LHM) | ✅ | one script |
+| **WattLlama** (Windows + Linux) | ✅ per model, per run, 3 engines | ✅ | ✅ (Windows: + LHM) | ✅ | one script |
 | [MSI Afterburner](https://www.msi.com/Landing/afterburner/graphics-cards) | ❌ | ❌ (log file) | ✅ GPU | admin | GUI app |
 | [HWiNFO](https://www.hwinfo.com) | ❌ | ❌ (CSV log) | ✅ | admin driver | GUI app |
 | [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor) | ❌ | ❌ | ✅ | admin driver | GUI app (WattLlama can read it) |
@@ -200,8 +238,11 @@ WattLlama does not replace a hardware monitor; it connects the watts to the toke
 
 WattLlama is a read-only monitor that runs as your user.
 
-- Listens on **127.0.0.1** only, unless you choose `-AllowLan` (then a random token is required).
-- **No dependencies**: Node.js built-ins and Windows' own tools only, nothing to supply-chain.
+- Runs as your user, never as admin or root. On Linux the optional RAPL helper is the only root part:
+  a short shell script under a locked-down unit that writes one file of coarse watts.
+- Listens on **127.0.0.1** only, unless you choose `-AllowLan` / `--allow-lan` (then a random token is
+  required, and `.env` is readable by you only).
+- **No dependencies**: Node.js built-ins and the OS's own tools only, nothing to supply-chain.
 - **GET only**, a fixed list of files (no path ever comes from the URL), strict
   **Content-Security-Policy**, `X-Frame-Options: DENY`, `nosniff`, no CORS.
 - **DNS-rebinding protection**: requests whose `Host` is a foreign domain are refused, so a website
@@ -210,10 +251,11 @@ WattLlama is a read-only monitor that runs as your user.
   file names, pi's `auth.json` and API keys are never read, prompts and replies are never stored.
 - Nothing is sent anywhere. *Share your result* only opens a GitHub page with what you saw.
 - The single optional write action (GPU power limit) is described above: off by default, local
-  only, same-origin with a custom header (blocks CSRF), range-checked, UAC-confirmed.
+  only, same-origin with a custom header (blocks CSRF), range-checked, confirmed in the OS's own prompt.
 - Crash-safe: an unexpected error is logged and the process restarts; it never touches drivers,
   clocks, fans or voltages.
-- CI runs the HTTP security rules as tests on every change.
+- CI runs the HTTP security rules as tests on every change, on Windows and Linux, and fails if the
+  RAPL helper's systemd hardening ever gets weaker.
 
 See [SECURITY.md](SECURITY.md) for reporting.
 
@@ -229,7 +271,8 @@ Everything lives in `.env` (see [.env.example](.env.example)); all settings are 
 | `DASH_LLAMA_LOG` | – | llama-server log file, for exact token counts |
 | `DASH_LLAMA_API_KEY` | – | if the server uses `--api-key` |
 | `DASH_OLLAMA_URL` | `OLLAMA_HOST` or `:11434` | empty = off |
-| `DASH_OLLAMA_LOG` | `%LOCALAPPDATA%\Ollama\server.log` | Ollama's log, for exact token counts |
+| `DASH_OLLAMA_LOG` | Windows: `%LOCALAPPDATA%\Ollama\server.log` | Ollama's log file, for exact token counts |
+| `DASH_OLLAMA_JOURNAL` / `DASH_OLLAMA_UNIT` | `1` / `ollama` | Linux: read the service's journal (`0` = off) |
 | `DASH_LMSTUDIO_URL` | `http://127.0.0.1:1234` | empty = off |
 | `DASH_LMSTUDIO_API_KEY` / `DASH_LMSTUDIO_LMS` | – / found | if the server requires a token / path to `lms` |
 | `DASH_PRICE_PER_KWH` / `DASH_CURRENCY` | – | optional cost: all-in price per kWh from your bill, e.g. `0.30` / `EUR` |
@@ -238,7 +281,7 @@ Everything lives in `.env` (see [.env.example](.env.example)); all settings are 
 | `DASH_LHM_URL` | – | LibreHardwareMonitor web server |
 | `DASH_ALLOW_POWER_LIMIT` | `0` | NVIDIA power limit control |
 | `DASH_TOKEN` | – | require a token (set by `-AllowLan`) |
-| `DASH_TASKS` | – | scheduled tasks to show, e.g. `Backup*,MyLLM` |
+| `DASH_TASKS` | – | Windows scheduled tasks or Linux systemd timers to show, e.g. `Backup*,MyLLM` |
 | `DASH_PI_DIR` | `~/.pi/agent` | pi agent settings |
 
 ## Contributing
