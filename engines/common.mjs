@@ -40,17 +40,31 @@ export function tail(file) {
 //   { release: n }                the request ended with n tokens in its context; models that
 //                                 write no text (classifiers, embeddings) print only this
 // Works with and without llama.cpp's log prefix / timestamps and the router's [port] prefix.
+//
+// Prompts can end up in a log, so a prompt could contain text that looks like these lines.
+// The parser therefore accepts only llama.cpp's exact line layout from the start of the line
+// ("[port] timestamp level slot <function>: id N | task N | ...", each prefix optional), and
+// numbers within sane limits; anything else is ignored.
+const LINE = /^(?:\[\d{1,5}\]\s+)?(?:\d+(?:\.\d+){1,4}\s+)?(?:[IWEDT]\s+)?slot\s+(launch_slot_|print_timing|release): id\s+\d+ \| task (\d+) \| (.*)$/;
+const sane = (n, max) => Number.isFinite(n) && n >= 0 && n <= max;
 export function parseLlamaLine(l) {
-  if (!l.includes("slot")) return null;
-  const task = Number(l.match(/\btask (\d+)/)?.[1] ?? NaN);
-  const t = Number.isFinite(task) ? { task } : {};
-  if (/launch_slot_.*processing task/.test(l)) return { req: 1, ...t };
-  const m = l.match(/print_timing:.*\|\s+(prompt )?eval time =\s*([\d.]+) ms \/\s*(\d+) tokens/);
-  if (m) return m[1] ? { pp: Number(m[3]), ms: Number(m[2]), ...t } : { gen: Number(m[3]), ms: Number(m[2]), ...t };
-  const d = l.match(/print_timing:.*draft acceptance = [\d.]+ \(\s*(\d+) accepted \/\s*(\d+) generated\)/);
-  if (d) return { draftAcc: Number(d[1]), draftGen: Number(d[2]), ...t };
-  const r = l.match(/release:.*n_tokens = (\d+)/);
-  if (r) return { release: Number(r[1]), ...t };
+  const h = LINE.exec(String(l).replace(/\s+$/, ""));      // logs written through PowerShell end lines in \r\r
+  if (!h) return null;
+  const [, fn, taskStr, rest] = h;
+  const task = Number(taskStr);
+  if (fn === "launch_slot_") return /^processing task\b/.test(rest) ? { req: 1, task } : null;
+  if (fn === "release") {
+    const r = rest.match(/^stop processing: n_tokens = (\d+)/);
+    return r && sane(Number(r[1]), 1e8) ? { release: Number(r[1]), task } : null;
+  }
+  const m = rest.match(/^\s*(prompt )?eval time =\s*([\d.]+) ms \/\s*(\d+) tokens \(/);
+  if (m) {
+    const ms = Number(m[2]), n = Number(m[3]);
+    if (!sane(n, 1e8) || !sane(ms, 7 * 86400_000) || (ms > 0 && n / (ms / 1000) > 1e6)) return null;   // > 1M tok/s: not real
+    return m[1] ? { pp: n, ms, task } : { gen: n, ms, task };
+  }
+  const d = rest.match(/^draft acceptance = [\d.]+ \(\s*(\d+) accepted \/\s*(\d+) generated\)/);
+  if (d && sane(Number(d[2]), 1e8) && Number(d[1]) <= Number(d[2])) return { draftAcc: Number(d[1]), draftGen: Number(d[2]), task };
   return null;
 }
 

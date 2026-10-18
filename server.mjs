@@ -808,6 +808,31 @@ function hostAllowed(hostHeader) {
   return /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || /^[0-9a-f:]+$/.test(host) && host.includes(":");
 }
 
+// Brute force and flooding. Wrong tokens: after 10 within 10 minutes the address is locked out
+// for 15 minutes (the token is 128 random bits, so guessing was hopeless anyway; this also keeps
+// the log quiet). Any other address than this PC: at most 600 requests a minute (the page needs
+// about 40). Memory stays bounded.
+const failures = new Map();        // ip -> { n, first, until }
+const hits = new Map();            // ip -> { n, first }
+const lockedOut = (ip, now) => (failures.get(ip)?.until ?? 0) > now;
+function authFailed(ip, now) {
+  const f = failures.get(ip);
+  const x = f && now - f.first < 10 * 60_000 ? f : { n: 0, first: now, until: 0 };
+  x.n++;
+  if (x.n >= 10 && !x.until) { x.until = now + 15 * 60_000; log(`too many wrong tokens from ${ip}: locked out for 15 minutes`); }
+  failures.set(ip, x);
+  if (failures.size > 10_000) failures.clear();
+}
+function flooding(ip, now) {
+  if (isLoopback(ip)) return false;
+  const h = hits.get(ip);
+  const x = h && now - h.first < 60_000 ? h : { n: 0, first: now };
+  x.n++;
+  hits.set(ip, x);
+  if (hits.size > 10_000) hits.clear();
+  return x.n > 600;
+}
+
 function tokenOk(req, u) {
   if (!TOKEN) return true;
   const given = [
@@ -830,7 +855,11 @@ const httpServer = http.createServer(async (req, res) => {
     const isControl = req.method === "POST" && u.pathname === "/api/gpu/power-limit";
     if (req.method !== "GET" && req.method !== "HEAD" && !isControl) return send(405, "text/plain", "read-only", { allow: "GET, HEAD" });
     if (!hostAllowed(req.headers.host)) return send(403, "text/plain", "Host not allowed");
-    if (!tokenOk(req, u)) return send(401, "text/plain", "Open the link with ?token=… from install.ps1, once.");
+    const ip = req.socket.remoteAddress || "", now = Date.now();
+    if (flooding(ip, now)) return send(429, "text/plain", "too many requests", { "retry-after": "60" });
+    if (TOKEN && lockedOut(ip, now)) return send(429, "text/plain", "too many wrong tokens, try again later", { "retry-after": "900" });
+    if (!tokenOk(req, u)) { authFailed(ip, now); return send(401, "text/plain", "Open the link with ?token=… from install.ps1, once."); }
+    failures.delete(ip);
     if (isControl) {
       const [code, out] = await setPowerLimit(req).catch((e) => [400, { error: e.message }]);
       return send(code, "application/json; charset=utf-8", JSON.stringify(out));
@@ -868,7 +897,13 @@ const httpServer = http.createServer(async (req, res) => {
 }).on("error", (e) => {
   log(e.code === "EADDRINUSE" ? `port ${CFG.port} is in use: set DASH_PORT in .env` : `server: ${e.message}`);
   process.exit(1);
-}).listen(CFG.port, CFG.host, () => {
+});
+// Slow or idle clients cannot hold connections open (slowloris), and there is a ceiling on them.
+httpServer.headersTimeout = 10_000;
+httpServer.requestTimeout = 30_000;
+httpServer.keepAliveTimeout = 5_000;
+httpServer.maxConnections = 64;
+httpServer.listen(CFG.port, CFG.host, () => {
   // The real port (DASH_PORT=0 lets the OS pick one, as the tests do).
   log(`WattLlama on http://${CFG.host}:${httpServer.address().port}${TOKEN ? " (token required)" : ""}`);
   if (CFG.host !== "127.0.0.1" && CFG.host !== "localhost" && !TOKEN) log("warning: reachable from the network without DASH_TOKEN");

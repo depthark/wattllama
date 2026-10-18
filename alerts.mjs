@@ -40,7 +40,9 @@ export function webhookRequest(hook, ev) {
   const text = `${icon} ${ev.title}: ${ev.message}`;
   if (hook.format === "discord") return { headers: { "content-type": "application/json" },
     body: JSON.stringify({ username: "WattLlama", content: text.slice(0, 1900), allowed_mentions: { parse: [] } }) };
-  if (hook.format === "slack") return { headers: { "content-type": "application/json" }, body: JSON.stringify({ text: text.slice(0, 3000) }) };
+  // Slack reads <!channel>, <@user> and links inside < >: escape them so a model name is just text.
+  if (hook.format === "slack") return { headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text: text.slice(0, 3000).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;") }) };
   if (hook.format === "ntfy") return { headers: { "content-type": "text/plain; charset=utf-8", title: `WattLlama: ${ev.title}`.replace(/[^\x20-\x7e]/g, ""),
     priority: ev.level === "crit" ? "high" : ev.level === "ok" ? "low" : "default", tags: ev.level === "ok" ? "white_check_mark" : "warning" }, body: ev.message };
   return { headers: { "content-type": "application/json" }, body: JSON.stringify({ source: "wattllama", kind: ev.kind, level: ev.level, title: ev.title, message: ev.message, time: new Date(ev.ts).toISOString() }) };
