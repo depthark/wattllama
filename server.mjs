@@ -88,6 +88,7 @@ const live = {
   gpus: new Map(),       // index -> nvidia-smi reading, see below
   cpu: null,             // { t, pkgW, dramW, util, mhz, zoneC, diskR, diskW, measured }
   lhm: null,             // { t, groups: [{ hardware, sensors: [{ name, kind, value, unit }] }], cpuTemp }
+  lhmGpus: [],           // AMD / Intel GPUs read from LibreHardwareMonitor, same shape as gpus
   llm: { t: 0, reachable: false, processing: false, models: [], engines: [] },
   sysW: null,
 };
@@ -144,7 +145,7 @@ async function pollLHM() {
   if (!LHM_URL) return;
   try {
     const root = await (await fetch(`${LHM_URL}/data.json`, { signal: AbortSignal.timeout(3000) })).json();
-    const groups = new Map();
+    const groups = new Map(), gpuHw = new Map();
     const walk = (node, hardware, depth) => {
       const hw = depth === 2 ? node.Text : hardware;      // root > computer > hardware > group > sensor
       for (const c of node.Children || []) walk(c, hw, depth + 1);
@@ -153,11 +154,17 @@ async function pollLHM() {
       if (!m) return;
       const unit = m[2], value = Number(m[1].replace(",", "."));
       const kind = { "°C": "temperature", RPM: "fan", W: "power", "%": "load", MHz: "clock", V: "voltage" }[unit] || "data";
+      const vendor = String(node.SensorId || "").match(/^\/gpu-(amd|intel)/)?.[1];
+      if (vendor) {      // AMD / Intel GPUs: nvidia-smi does not see them, Windows has no watts for them
+        if (!gpuHw.has(hw)) gpuHw.set(hw, { vendor, sensors: [] });
+        gpuHw.get(hw).sensors.push({ name: node.Text, kind, value, unit });
+      }
       if (!["temperature", "fan"].includes(kind)) return;     // the rest is already measured above
       if (!groups.has(hw)) groups.set(hw, []);
       groups.get(hw).push({ name: node.Text, kind, value, unit });
     };
     walk(root, null, 0);
+    live.lhmGpus = lhmGpus(gpuHw);
     const all = [...groups.values()].flat();
     // CPU temperature: Intel "CPU Package", AMD "Core (Tctl/Tdie)", else the hottest core.
     const cpuGroup = [...groups].find(([hw]) => /intel|amd|ryzen|core|cpu/i.test(hw) && !/nvidia|radeon rx|geforce/i.test(hw));
@@ -167,13 +174,37 @@ async function pollLHM() {
       groups: [...groups].map(([hardware, sensors]) => ({ hardware, sensors })) };
   } catch {
     live.lhm = live.lhm && Date.now() - live.lhm.t < 30_000 ? live.lhm : null;
+    if (!live.lhm) live.lhmGpus = [];
   }
+}
+
+// Integrated graphics draw from the CPU package, which RAPL already measures: skip them.
+const INTEGRATED_GPU = /radeon\(tm\) graphics|radeon graphics|vega \d+ graphics|\b(uhd|iris|hd) graphics|intel\(r\) graphics|arc\(tm\) graphics|780m|880m|890m/i;
+function lhmGpus(gpuHw) {
+  const out = [];
+  let i = 0;
+  for (const [name, { vendor, sensors }] of gpuHw) {
+    if (INTEGRATED_GPU.test(name)) continue;
+    const of = (kind) => sensors.filter((s) => s.kind === kind);
+    const pw = of("power"), pick = (list, re) => list.find((s) => re.test(s.name));
+    const power = (pick(pw, /package|total|board|^gpu power$/i) || pw.sort((a, b) => b.value - a.value)[0])?.value;
+    if (power == null) continue;
+    const temps = of("temperature");
+    const mem = (re) => { const s = pick(sensors.filter((x) => x.unit === "MB" || x.unit === "GB"), re); return s ? s.value * (s.unit === "GB" ? 1024 : 1) : null; };
+    out.push({ t: Date.now(), index: `${vendor}${i++}`, name, power, source: "LibreHardwareMonitor",
+      temp: (pick(temps, /core|edge|^gpu$/i) || temps[0])?.value ?? null,
+      util: pick(of("load"), /core|^gpu$|3d/i)?.value ?? null,
+      fan: null, vramUsed: mem(/memory used|vram used|dedicated memory used/i), vramTotal: mem(/memory total|vram total|dedicated memory total/i),
+      clockSm: pick(of("clock"), /core|shader|gpu/i)?.value ?? null, clockMem: pick(of("clock"), /memory/i)?.value ?? null,
+      limit: null, limitMin: null, throttle: [] });
+  }
+  return out;
 }
 if (LHM_URL) setInterval(pollLHM, 5000);
 
 function gpuTotals(now) {
   let power = 0, temp = null, vramUsed = 0, vramTotal = 0, util = 0, n = 0, limit = 0, fan = null;
-  for (const g of live.gpus.values()) {
+  for (const g of [...live.gpus.values(), ...live.lhmGpus]) {
     if (now - g.t > 15_000) continue;
     n++; power += g.power; vramUsed += g.vramUsed ?? 0; vramTotal += g.vramTotal ?? 0; limit += g.limit ?? 0;
     util = Math.max(util, g.util ?? 0);
@@ -461,7 +492,7 @@ function liveView() {
   return {
     t: now, sysW: live.sysW,
     gpu: gpuTotals(now),
-    gpus: [...live.gpus.values()].filter(fresh).map(({ t, ...g }) => g),
+    gpus: [...live.gpus.values(), ...live.lhmGpus].filter(fresh).map(({ t, ...g }) => g),
     cpu: fresh(c) && { power: c.pkgW, dram: c.dramW, util: c.util, measured: c.measured, mhz: c.mhz, zoneC: c.zoneC,
       temp: fresh(live.lhm) ? live.lhm.cpuTemp : null },
     ram: { used: os.totalmem() - os.freemem(), total: os.totalmem() },

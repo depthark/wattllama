@@ -16,9 +16,9 @@ async function refreshLive() {
   try {
     const L = await get("api/live");
     $("nowW").innerHTML = L.sysW == null ? "–" : `${Math.round(L.sysW)} <small>W whole PC (est.)</small>`;
-    $("nowGpu").textContent = L.gpu ? `${fmtW(L.gpu.power)} · ${L.gpu.temp ?? "–"} °C · ${L.gpu.util} %` : "no NVIDIA GPU";
+    $("nowGpu").textContent = L.gpu ? `${fmtW(L.gpu.power)} · ${L.gpu.temp ?? "–"} °C · ${Math.round(L.gpu.util)} %` : "not measured";
     $("nowCpu").textContent = L.cpu ? `${fmtW(L.cpu.power + L.cpu.dram)} · ${Math.round(L.cpu.util)} %${L.cpu.measured ? "" : " (est.)"}` : "–";
-    $("nowVram").textContent = L.gpu ? `${(L.gpu.vramUsed / 1024).toFixed(1)} / ${(L.gpu.vramTotal / 1024).toFixed(1)} GB` : "–";
+    $("nowVram").textContent = L.gpu?.vramTotal ? `${(L.gpu.vramUsed / 1024).toFixed(1)} / ${(L.gpu.vramTotal / 1024).toFixed(1)} GB` : "–";
     const m = L.llm;
     liveModels = m?.models || [];
     $("status").innerHTML = !m ? "LLM tracking off"
@@ -50,7 +50,7 @@ async function refreshSummary() {
   $("actToday").textContent = `${dur(t.act)} · prefill ${nf(t.pp)}`;
   $("whk").textContent = a.gen > 0 ? energy(a.wha / (a.gen / 1000)) : "–";
   $("per1m").textContent = a.gen > 0 ? energy(a.wha / (a.gen / 1e6)) : "–";
-  $("foot").textContent = `GPU (nvidia-smi) and CPU + RAM (Windows Energy Meter / RAPL) are measured; the rest of the PC is an estimate of ${S.restW} W `
+  $("foot").textContent = `GPU (nvidia-smi; AMD / Intel via LibreHardwareMonitor) and CPU + RAM (Windows Energy Meter / RAPL) are measured; the rest of the PC is an estimate of ${S.restW} W `
     + `and the power supply ${Math.round(S.psuEff * 100)} % efficient. The monitor is not included. Data since ${S.first ? new Date(S.first).toLocaleString() : "now"}.`;
 }
 
@@ -148,14 +148,15 @@ function renderHardware(L) {
   for (const g of L.gpus || []) {
     const pl = plDraft[g.index] ?? Math.round(g.limit ?? 0);
     cards.push(`<div class="card"><h3>GPU ${esc(g.index)} · ${esc(g.name)}</h3>
-      <div class="row"><span>power</span><span>${fmtW(g.power)} of ${fmtW(g.limit)} limit</span></div>${bar(g.power, g.limit, "--gpu")}
+      <div class="row"><span>power</span><span>${fmtW(g.power)}${g.limit ? ` of ${fmtW(g.limit)} limit` : ""}</span></div>${g.limit ? bar(g.power, g.limit, "--gpu") : ""}
       <div class="row"><span>temperature</span><span>${g.temp ?? "–"} °C</span></div>
       <div class="row"><span>fan</span><span>${g.fan == null ? "–" : `${g.fan} %`}</span></div>
       <div class="row"><span>load · memory bus</span><span>${g.util ?? "–"} % · ${g.memUtil ?? "–"} %</span></div>
       <div class="row"><span>clocks core · mem</span><span>${g.clockSm ?? "–"} · ${g.clockMem ?? "–"} MHz</span></div>
-      <div class="row"><span>VRAM</span><span>${(g.vramUsed / 1024).toFixed(1)} / ${(g.vramTotal / 1024).toFixed(1)} GB</span></div>${bar(g.vramUsed, g.vramTotal, "--cpu")}
+      ${g.vramTotal ? `<div class="row"><span>VRAM</span><span>${(g.vramUsed / 1024).toFixed(1)} / ${(g.vramTotal / 1024).toFixed(1)} GB</span></div>${bar(g.vramUsed, g.vramTotal, "--cpu")}` : ""}
+      ${g.source ? `<div class="muted" style="font-size:12px">read from ${esc(g.source)}</div>` : `
       <div class="row"><span>state · PCIe</span><span>${esc(g.pstate || "–")} · ${esc(g.pcie || "–")}</span></div>
-      <div class="row"><span>held back by</span><span>${g.throttle?.length ? esc(g.throttle.join(", ")) : "nothing"}</span></div>
+      <div class="row"><span>held back by</span><span>${g.throttle?.length ? esc(g.throttle.join(", ")) : "nothing"}</span></div>`}
       ${g.limitMin != null ? `<div class="pl">
         <div class="row"><span>power limit</span><span><b id="plv${esc(g.index)}">${pl} W</b> <span class="muted">(${g.safeMin}–${Math.round(g.limitMax)}, default ${Math.round(g.limitDefault)})</span></span></div>
         ${hwControl ? `<input type="range" min="${g.safeMin}" max="${Math.floor(g.limitMax)}" step="5" value="${pl}" data-gpu="${esc(g.index)}" class="plr">
