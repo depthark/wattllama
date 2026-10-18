@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
+  windows:
     name: Windows, Node ${{ matrix.node }}
     runs-on: windows-latest
     timeout-minutes: 10
@@ -50,3 +50,33 @@ jobs:
           if (("$line" -split ',').Count -ne 7) { throw "unexpected sampler output: $line" }
       - name: Tests
         run: node --test tests/*.test.mjs
+
+  linux:
+    name: Linux, Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22.13", "22", "24"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Syntax check
+        run: find . -name '*.mjs' -not -path './node_modules/*' -print0 | xargs -0 -n1 node --check
+      - name: Shell scripts (shellcheck)
+        run: shellcheck install.sh uninstall.sh start.sh platform/rapl-helper.sh
+      - name: RAPL helper unit is locked down
+        run: systemd-analyze security --offline=yes --threshold=15 platform/wattllama-rapl.service
+      - name: Tests
+        run: node --test tests/*.test.mjs
+      - name: install.sh, page, uninstall.sh
+        run: |
+          ./install.sh --no-open
+          curl -sf http://127.0.0.1:8091/api/live | head -c 300; echo
+          curl -sf -o /dev/null http://127.0.0.1:8091/
+          ./uninstall.sh --remove-data
