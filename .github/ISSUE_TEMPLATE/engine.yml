@@ -1,0 +1,20 @@
+name: Engine support
+description: Ask for (or offer to write) support for another inference engine
+labels: ["engine"]
+body:
+  - type: input
+    id: engine
+    attributes: { label: Engine, placeholder: "vLLM, KoboldCpp, llama-swap, Jan ..." }
+    validations: { required: true }
+  - type: textarea
+    id: api
+    attributes:
+      label: What it exposes
+      description: Endpoints or log lines that list loaded models, show a request in progress, or report token counts. Real examples are gold.
+  - type: checkboxes
+    id: help
+    attributes:
+      label: Can you help?
+      options:
+        - label: I can test a pull request
+        - label: I would like to write the adapter (see CONTRIBUTING.md)

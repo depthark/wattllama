@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Windows, Node ${{ matrix.node }}
+    runs-on: windows-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22.13", "22", "24"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+      - name: No dependencies
+        shell: pwsh
+        run: |
+          $p = Get-Content package.json -Raw | ConvertFrom-Json
+          if ($p.dependencies -or $p.devDependencies) { throw 'WattLlama has no npm dependencies; please keep it that way.' }
+      - name: Syntax check
+        shell: pwsh
+        run: |
+          Get-ChildItem -Recurse -Include *.mjs,*.js -Exclude node_modules | ForEach-Object { node --check $_.FullName; if ($LASTEXITCODE) { exit 1 } }
+          foreach ($f in Get-ChildItem -Recurse -Filter *.ps1) {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$errors) | Out-Null
+            if ($errors) { $errors | ForEach-Object { Write-Error "$($f.Name): $_" }; exit 1 }
+          }
+      - name: Sampler runs without admin
+        shell: pwsh
+        run: |
+          $line = powershell.exe -NoProfile -ExecutionPolicy Bypass -File sampler.ps1 -IntervalMs 1000 -Count 2 | Select-Object -Last 1
+          "sampler: $line"
+          if (("$line" -split ',').Count -ne 7) { throw "unexpected sampler output: $line" }
+      - name: Tests
+        run: node --test tests/*.test.mjs

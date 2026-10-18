@@ -1,0 +1,26 @@
+name: Bug report
+description: Something is wrong or missing on the page
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes: { label: What happened, description: "And what you expected instead. A screenshot helps." }
+    validations: { required: true }
+  - type: input
+    id: version
+    attributes: { label: WattLlama version, description: "From package.json or the Share your result box" }
+  - type: input
+    id: windows
+    attributes: { label: Windows version, placeholder: "Windows 11 23H2" }
+  - type: input
+    id: hardware
+    attributes: { label: GPU / CPU }
+  - type: input
+    id: engine
+    attributes: { label: Engine and version, placeholder: "llama.cpp b11669 router / Ollama 0.40.6 / LM Studio 0.4.2" }
+  - type: textarea
+    id: log
+    attributes:
+      label: data\wattllama.log
+      description: The last lines, if anything looks related. Check it contains nothing private first.
+      render: text
