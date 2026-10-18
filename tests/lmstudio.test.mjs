@@ -50,3 +50,37 @@ test("older LM Studio: /api/v0/models", async () => {
     assert.deepEqual(r.models.map((m) => m.id), ["llama-3.2-1b"]);
   } finally { api.close(); }
 });
+
+test("LM Studio 0.4: input and output arrive together, busy time comes from totalTimeSec", async () => {
+  const api = await mockServer({ "/api/v1/models": { models: [{ type: "llm", key: "q", loaded_instances: [{ id: "qwen3-8b", config: {} }] }] } });
+  const sink = tokenSink();
+  process.env.FAKE_LMS_MODE = "atonce";
+  let e;
+  try {
+    e = lmstudio.create({ env: { DASH_LMSTUDIO_URL: api.url, DASH_LMSTUDIO_LMS: fileURLToPath(new URL("./fake-lms.mjs", import.meta.url)) },
+      addTokens: sink.addTokens });
+    await e.poll();
+    await wait(1200);
+    let r = await e.poll();
+    assert.equal(r.models[0].busySec, 2.69);
+    assert.deepEqual(sink.got.get("qwen3-8b"), { gen: 120, pp: 33, req: 1 });
+    r = await e.poll();
+    assert.equal(r.models[0].busySec, 0, "credited once");
+  } finally { delete process.env.FAKE_LMS_MODE; e?.stop(); api.close(); }
+});
+
+test("earlier style: a poll saw it generating, so no extra busy time", async () => {
+  const api = await mockServer({ "/api/v1/models": { models: [{ type: "llm", key: "q", loaded_instances: [{ id: "qwen3-8b", config: {} }] }] } });
+  let e;
+  try {
+    e = lmstudio.create({ env: { DASH_LMSTUDIO_URL: api.url, DASH_LMSTUDIO_LMS: fileURLToPath(new URL("./fake-lms.mjs", import.meta.url)) },
+      addTokens: () => {} });
+    await e.poll();
+    await wait(800);
+    assert.equal((await e.poll()).models[0].processing, true);
+    await wait(1200);
+    const r = await e.poll();
+    assert.equal(r.models[0].processing, false);
+    assert.equal(r.models[0].busySec, 0);
+  } finally { e?.stop(); api.close(); }
+});

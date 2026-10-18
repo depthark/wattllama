@@ -390,16 +390,24 @@ async function tick() {
   if (cpuT != null) { b.cpuT += cpuT * dt; b.cpuTsecs += dt; b.cpuTmax = Math.max(b.cpuTmax ?? 0, cpuT); }
   const wh = (sysW * dt) / 3600;
   b.wh += wh; b.whGpu += (gpuW * dt) / 3600;
-  if (live.llm.processing) { b.active += dt; b.whActive += wh; }
-
+  // Busy time per model: polled (processing) or, for engines that only report a request
+  // once it is finished (LM Studio), its exact duration (busySec), credited now at the
+  // current power. Whole-PC busy time stays within the minute's seconds.
   const mb = (id) => { let x = b.models.get(id); if (!x) b.models.set(id, x = modelBucket()); return x; };
+  let pcBusy = 0;
   for (const m of live.llm.models || []) {
-    if (m.processing) {
-      const x = mb(m.id); x.active += dt; x.wh += wh;
-      let r = openRuns.get(m.id);
-      if (!r) openRuns.set(m.id, r = { start: now, last: now, active: 0, wh: 0, gen: 0, pp: 0, req: 0 });
-      r.last = now; r.active += dt; r.wh += wh;
-    }
+    const s = m.processing ? dt : Math.min(m.busySec || 0, 3600);
+    if (s <= 0) continue;
+    const e = (sysW * s) / 3600;
+    pcBusy = Math.max(pcBusy, s);
+    const x = mb(m.id); x.active += s; x.wh += e;
+    let r = openRuns.get(m.id);
+    if (!r) openRuns.set(m.id, r = { start: now - (m.processing ? 0 : s * 1000), last: now, active: 0, wh: 0, gen: 0, pp: 0, req: 0 });
+    r.last = now; r.active += s; r.wh += e;
+  }
+  if (pcBusy > 0) {
+    const s = Math.min(pcBusy, Math.max(0, b.secs - b.active));
+    b.active += s; b.whActive += (sysW * s) / 3600;
   }
   for (const [id, r] of openRuns) if (now - r.last > RUN_GAP_MS) closeRun(id);
   for (const [id, p] of pending) {     // log lines land just after a reply ends

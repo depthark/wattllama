@@ -97,7 +97,7 @@ nothing; it is asked again every 10 s and appears when you start it.
 |---|---|---|---|
 | **llama.cpp** `llama-server`, router too | `DASH_LLAMA_URL` (:8080) | exact from its log (`DASH_LLAMA_LOG`) or `--metrics`; else `/slots` (close) | `/slots` |
 | **Ollama** (the app or `ollama serve`) | `OLLAMA_HOST` or :11434 | exact from `%LOCALAPPDATA%\Ollama\server.log`; else `/slots` (close) | the model's llama-server `/slots` |
-| **LM Studio** (Developer → Start server) | `DASH_LMSTUDIO_URL` (:1234) | exact, LM Studio's own stats via `lms log stream` | between a prediction's start and end |
+| **LM Studio** (Developer → Start server) | `DASH_LMSTUDIO_URL` (:1234) | exact, LM Studio's own stats via `lms log stream` | each prediction's exact duration, counted when it ends |
 
 <details>
 <summary>Details per engine</summary>
@@ -117,6 +117,8 @@ Models served by another Ollama runner show as loaded, without token counts.
 `%USERPROFILE%\.lmstudio\bin`. WattLlama starts `lms log stream` only while the server answers and
 always with an explicit port, so it never launches LM Studio. Prompts and replies pass through that
 stream; WattLlama reads only the model name and the numbers, and never stores, logs or shows text.
+LM Studio reports a prediction only when it is finished, so its busy time is counted from its exact
+duration at that moment, and the page shows it as idle while it generates. Tested with llmster 0.0.25.
 
 **Something else?** vLLM, KoboldCpp, llama-swap, Jan, … An adapter is one file:
 see [CONTRIBUTING.md](CONTRIBUTING.md#adding-an-engine).

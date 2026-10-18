@@ -55,7 +55,9 @@ export function create({ env, addTokens, log }) {
   async function poll() {
     // Report tokens as they finish: addTokens(modelId, generated, promptProcessed, requests)
     return {
-      models: [{ id: "model-name", kind: "text", processing: false, genRate: 0 }],   // loaded models only
+      models: [{ id: "model-name", kind: "text", processing: false, genRate: 0,      // loaded models only
+        busySec: 0 }],                    // optional: seconds of requests that finished unseen
+                                          // since the last poll (engines that report afterwards)
       tokenSource: "log",                 // where counts come from: "log" | "metrics" | "slots" | ... | "none"
       note: undefined,                    // optional: one line shown when counts are limited
     };
@@ -77,7 +79,8 @@ What makes an adapter good:
 - **Exact counts first.** Prefer what the engine itself reports per request (its log, a metrics
   endpoint, per-request stats) over sampling live counters.
 - **`processing` must be true while the model generates**, because busy time and energy per token
-  are measured from it.
+  are measured from it. If the engine only tells you about a request once it is finished (LM Studio),
+  report its exact duration once in `busySec` instead.
 - **Never load a model.** Some APIs load a model when you ask about it (llama.cpp's router does).
 - **Cheap.** One or two local HTTP calls per poll. Start a long-running child process (like
   `lms log stream`) only while the engine answers, and kill it in `stop()`.
