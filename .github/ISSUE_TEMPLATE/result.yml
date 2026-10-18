@@ -1,0 +1,54 @@
+name: Share a result
+description: Add your PC to the community results table (RESULTS.md)
+title: "Result: "
+labels: ["result"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks! The **Share your result** box on your WattLlama page fills this in for you.
+        Numbers are whole-PC energy while the model generated (GPU + CPU + RAM measured, rest estimated).
+  - type: input
+    id: gpu
+    attributes: { label: GPU }
+    validations: { required: true }
+  - type: input
+    id: cpu
+    attributes: { label: CPU }
+  - type: input
+    id: ram
+    attributes: { label: RAM }
+  - type: input
+    id: model
+    attributes: { label: Model }
+    validations: { required: true }
+  - type: input
+    id: quant
+    attributes: { label: Quantization }
+  - type: input
+    id: engine
+    attributes: { label: Engine, description: "llama.cpp, Ollama, LM Studio, ..." }
+  - type: input
+    id: power_limit
+    attributes: { label: GPU power limit }
+  - type: input
+    id: tok_s
+    attributes: { label: Generation speed (tok/s) }
+  - type: input
+    id: wh_1k
+    attributes: { label: Wh per 1k generated tokens }
+    validations: { required: true }
+  - type: input
+    id: tokens
+    attributes: { label: Tokens measured }
+  - type: input
+    id: version
+    attributes: { label: WattLlama version }
+  - type: textarea
+    id: row
+    attributes: { label: Table row, render: markdown }
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Anything that matters for the numbers (context size, offloaded layers, undervolt, prompt type ...)

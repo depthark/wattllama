@@ -222,6 +222,53 @@ async function refreshEfficiency() {
     : `<tr><td class="muted">Generate with different power limits and compare speed and energy per token here.</td></tr>`;
 }
 
+// ---------- share your result (community RESULTS.md) ----------
+
+const REPO = "https://github.com/depthark/wattllama";
+let shareData = null;
+async function refreshShare() {
+  shareData = await get("api/share");
+  const sel = $("shareModel"), ids = shareData.models.map((m) => m.model), want = ids.join("|");
+  if (sel.dataset.ids !== want) {
+    const keep = sel.value;
+    sel.dataset.ids = want;
+    sel.innerHTML = ids.map((id) => `<option value="${esc(id)}">${esc(short(id))}</option>`).join("");
+    if (ids.includes(keep)) sel.value = keep;
+  }
+  drawShare();
+}
+function shareRow() {
+  const D = shareData, m = D?.models.find((x) => x.model === $("shareModel").value);
+  if (!m) return null;
+  const sm = (setupModels || []).find((x) => x.id === m.model);
+  const quant = m.quant || sm?.args?.find(([k]) => k === "quant")?.[1] || "";
+  const engine = m.engine || sm?.engine || "";
+  return { gpu: D.gpus.join(" + ") || "none", cpu: D.cpu, ram: `${D.ramGB} GB`, os: D.os, model: short(m.model), quant, engine,
+    power_limit: m.powerLimit ? `${m.powerLimit} W` : "", tok_s: m.tokPerS ? m.tokPerS.toFixed(1) : "",
+    wh_1k: m.whPer1k.toFixed(2), tokens: String(m.tokens), version: D.version };
+}
+function drawShare() {
+  const r = shareRow(), open = $("shareOpen");
+  if (!r) { $("sharePreview").textContent = "Generate at least 1,000 tokens with a model to share a result."; open.setAttribute("aria-disabled", "true"); open.removeAttribute("href"); return; }
+  const md = `| ${r.gpu} | ${r.cpu} | ${r.ram} | ${r.model} | ${r.quant || "–"} | ${r.engine || "–"} | ${r.power_limit || "–"} | ${r.tok_s || "–"} | ${r.wh_1k} | ${Number(r.tokens).toLocaleString("en")} | ${r.version} |`;
+  $("sharePreview").textContent = [
+    `GPU: ${r.gpu}`,
+    `CPU: ${r.cpu} · RAM ${r.ram} · ${r.os}`,
+    `Model: ${r.model}${r.quant ? ` (${r.quant})` : ""}${r.engine ? ` on ${r.engine}` : ""}`,
+    `Generation: ${r.tok_s || "–"} tok/s · ${r.wh_1k} Wh per 1k tokens (whole PC while busy) · ${Number(r.tokens).toLocaleString()} tokens${r.power_limit ? ` · GPU limit ${r.power_limit}` : ""}`,
+    "", md].join("\n");
+  const q = new URLSearchParams({ template: "result.yml", title: `Result: ${r.model} on ${r.gpu}`, ...r, row: md });
+  open.href = `${REPO}/issues/new?${q}`;
+  open.removeAttribute("aria-disabled");
+}
+$("shareModel").addEventListener("change", drawShare);
+$("shareCopy").addEventListener("click", async () => {
+  const t = $("sharePreview").textContent;
+  try { await navigator.clipboard.writeText(t); $("shareMsg").textContent = "copied"; }
+  catch { getSelection().selectAllChildren($("sharePreview")); $("shareMsg").textContent = "selected: press Ctrl+C"; }
+  setTimeout(() => { $("shareMsg").textContent = ""; }, 2500);
+});
+
 // ---------- tiny canvas charts ----------
 
 function setup(cv) {
@@ -421,7 +468,7 @@ matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { dr
 const safe = (f) => f().catch(() => {});
 async function fast() { if (!document.hidden) await safe(refreshLive); setTimeout(fast, 2000); }
 async function slow() {
-  if (!document.hidden) { await safe(refreshSummary); await safe(refreshSeries); await safe(refreshRuns); await safe(refreshHeat); await safe(refreshEfficiency); }
+  if (!document.hidden) { await safe(refreshSummary); await safe(refreshSeries); await safe(refreshRuns); await safe(refreshHeat); await safe(refreshEfficiency); await safe(refreshShare); }
   setTimeout(slow, 30000);
 }
 async function slowest() { if (!document.hidden) await safe(refreshSetup); setTimeout(slowest, 60000); }

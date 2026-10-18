@@ -81,6 +81,15 @@
   <h2 class="sec">LLM runs</h2>
   <div class="card scroll"><table id="runs"></table><button class="theme" id="runsMore" hidden style="margin-top:8px"></button></div>
 
+  <h2 class="sec">Share your result</h2>
+  <div class="card" id="shareCard">
+    <div class="muted" style="font-size:13px;margin-bottom:8px">Add your PC to the <a href="https://github.com/depthark/wattllama/blob/main/RESULTS.md" target="_blank" rel="noopener noreferrer">community results</a>: how fast and how efficient local models are on real hardware.
+      Only what you see below is shared, and only if you open the issue yourself.</div>
+    <div class="hd" style="justify-content:flex-start;margin-bottom:8px"><select id="shareModel" class="sel" aria-label="Model"></select>
+      <button class="theme" id="shareCopy">Copy</button><a class="theme btn" id="shareOpen" target="_blank" rel="noopener noreferrer">Open a GitHub issue</a><span class="muted" id="shareMsg"></span></div>
+    <pre id="sharePreview" class="pre">Generate at least 1,000 tokens with a model to share a result.</pre>
+  </div>
+
   <h2 class="sec">Models</h2>
   <div class="grid" id="models"><div class="card muted">loading…</div></div>
 

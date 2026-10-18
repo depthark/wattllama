@@ -575,6 +575,27 @@ async function setup() {
   };
 }
 
+// "Share your result": one model's all-time numbers plus the hardware names, for the
+// community results table. Nothing is sent anywhere: the page shows a preview and the
+// user decides to open a GitHub issue with it. No host name, user name or path.
+const VERSION = readJSON(path.join(DIR, "package.json"))?.version || "dev";
+const engineOf = new Map();          // model -> engine name, learnt while it is loaded
+function share() {
+  for (const m of live.llm.models || []) engineOf.set(m.id, m.engine);
+  const rel = os.release().split(".").map(Number);
+  const winName = rel[0] === 10 ? (rel[2] >= 22000 ? "Windows 11" : "Windows 10") : `Windows ${os.release()}`;
+  const gpus = [...live.gpus.values(), ...live.lhmGpus].map((g) => g.name);
+  const models = db.prepare(`SELECT mm.model, SUM(mm.gen_tok) gen, SUM(mm.active_s) act, SUM(mm.wh) wh,
+      SUM(m.gpu_pl * mm.active_s) / NULLIF(SUM(CASE WHEN m.gpu_pl IS NULL THEN 0 ELSE mm.active_s END), 0) pl
+    FROM mm LEFT JOIN m ON m.ts = mm.ts WHERE mm.gen_tok > 0 GROUP BY mm.model HAVING SUM(mm.gen_tok) >= 1000 ORDER BY gen DESC`).all()
+    .map((r) => ({ model: r.model, engine: engineOf.get(r.model) || "",
+      quant: r.model.match(/(?:^|[-_.:])((?:UD-)?(?:IQ\d_[A-Z0-9_]+|Q\d(?:_[A-Z0-9]+)*|F16|BF16|FP16|MXFP4|\d-?bit))(?=$|[-_.:])/i)?.[1] || "",
+      tokens: r.gen, tokPerS: r.act > 0 ? r.gen / r.act : null, whPer1k: r.wh / (r.gen / 1000),
+      powerLimit: r.pl ? Math.round(r.pl) : null }));
+  return { version: VERSION, os: winName, cpu: os.cpus()[0]?.model.trim().replace(/\s+/g, " ") || "",
+    ramGB: Math.round(os.totalmem() / 1073741824), gpus, psuEff: CFG.psuEff, restW: CFG.restW, models };
+}
+
 function runs(limit = 40) {
   const rows = db.prepare("SELECT * FROM runs ORDER BY start DESC LIMIT ?").all(limit);
   for (const [model, r] of openRuns) rows.unshift({ start: r.start, end: r.last, model, active_s: r.active,
@@ -700,6 +721,7 @@ http.createServer(async (req, res) => {
     if (u.pathname === "/api/heatmap") return json(heatmap(u.searchParams.get("days"), u.searchParams.get("model")));
     if (u.pathname === "/api/setup") return json(await setup());
     if (u.pathname === "/api/efficiency") return json(efficiency());
+    if (u.pathname === "/api/share") return json(share());
     send(404, "text/plain", "not found");
   } catch (e) {
     log("http", e.message);
