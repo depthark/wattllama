@@ -82,3 +82,5 @@ code { background: var(--chipbg); border: 1px solid var(--line); border-radius: 
 .pre { margin: 0; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--chipbg); font-size: 12px; white-space: pre-wrap; word-break: break-word; }
 a.btn { text-decoration: none; display: inline-block; }
 a.btn[aria-disabled="true"] { opacity: .45; pointer-events: none; }
+.exp { margin-left: auto; font-size: 12px; align-self: center; }
+.exp a { color: inherit; }

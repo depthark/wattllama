@@ -71,6 +71,15 @@ test("server: security rules, endpoints, AMD GPU via LibreHardwareMonitor", { ti
     }
     assert.equal(JSON.parse((await request(port, { path: "/api/series?range=x';drop" })).body).range, "24h");
 
+    const csv = await request(port, { path: "/api/export.csv?data=runs&range=all" });
+    assert.equal(csv.status, 200);
+    assert.match(csv.headers["content-disposition"], /wattllama-runs-all\.csv/);
+    const lines = csv.body.split(/\n/);
+    assert.match(lines[0], /^time,start,end,model,/);
+    assert.ok(lines.length > 10, "demo runs exported");
+    const bad = await request(port, { path: "/api/export.csv?data=sqlite_master;--&range=x" });
+    assert.match(bad.headers["content-disposition"], /wattllama-minutes-30d\.csv/);
+
     // LHM is polled every 5 s
     let live;
     for (let i = 0; i < 30; i++) {

@@ -55,6 +55,13 @@ async function refreshSummary() {
 }
 
 async function refreshSeries() { series = await get(`api/series?range=${range}`); drawAll(); }
+function csvLinks() {
+  const r = range === "1h" || range === "6h" ? "24h" : range;
+  $("csvMin").href = `api/export.csv?data=minutes&range=${r}`;
+  $("csvMod").href = `api/export.csv?data=models&range=${r}`;
+  $("csvRuns").href = `api/export.csv?data=runs&range=${r}`;
+}
+csvLinks();
 
 let runsAll = false, runsData = [];
 async function refreshRuns() { runsData = await get("api/runs"); drawRuns(); }
@@ -379,7 +386,7 @@ for (const cv of document.querySelectorAll("canvas")) {
 
 $("tabs").addEventListener("click", (e) => {
   const b = e.target.closest("button"); if (!b) return;
-  range = b.dataset.r;
+  range = b.dataset.r; csvLinks();
   for (const x of $("tabs").children) x.classList.toggle("on", x === b);
   refreshSeries();
 });

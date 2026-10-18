@@ -596,6 +596,30 @@ function share() {
     ramGB: Math.round(os.totalmem() / 1073741824), gpus, psuEff: CFG.psuEff, restW: CFG.restW, models };
 }
 
+// CSV export: one table, streamed row by row (memory stays flat even for months of data).
+// The table and range come from fixed lists, never from the URL as SQL.
+const EXPORTS = {
+  minutes: ["m", "ts"], models: ["mm", "ts"], runs: ["runs", "start"],
+};
+const EXPORT_RANGES = { "24h": 86400, "7d": 7 * 86400, "30d": 30 * 86400, all: null };
+function exportCSV(res, sendHeaders, what, range) {
+  const [table, tcol] = EXPORTS[what] || EXPORTS.minutes;
+  const span = EXPORT_RANGES[range] === undefined ? EXPORT_RANGES["30d"] : EXPORT_RANGES[range];
+  const from = span == null ? 0 : Date.now() - span * 1000;
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+  const cell = (v) => v == null ? "" : typeof v === "number" ? (Number.isInteger(v) ? String(v) : String(+v.toFixed(4)))
+    : /[",\r\n]/.test(v) || /^[=+\-@]/.test(v) ? `"${String(v).replace(/^([=+\-@])/, "'$1").replace(/"/g, '""')}"` : v;   // no spreadsheet formulas
+  sendHeaders({ "content-type": "text/csv; charset=utf-8",
+    "content-disposition": `attachment; filename="wattllama-${what in EXPORTS ? what : "minutes"}-${range in EXPORT_RANGES ? range : "30d"}.csv"` });
+  res.write(["time", ...cols].join(",") + "\n");
+  let chunk = "";
+  for (const r of db.prepare(`SELECT * FROM ${table} WHERE ${tcol} >= ? ORDER BY ${tcol}`).iterate(from)) {
+    chunk += [new Date(r[tcol]).toISOString(), ...cols.map((c) => cell(r[c]))].join(",") + "\n";
+    if (chunk.length > 64 << 10) { res.write(chunk); chunk = ""; }
+  }
+  res.end(chunk);
+}
+
 function runs(limit = 40) {
   const rows = db.prepare("SELECT * FROM runs ORDER BY start DESC LIMIT ?").all(limit);
   for (const [model, r] of openRuns) rows.unshift({ start: r.start, end: r.last, model, active_s: r.active,
@@ -722,6 +746,10 @@ http.createServer(async (req, res) => {
     if (u.pathname === "/api/setup") return json(await setup());
     if (u.pathname === "/api/efficiency") return json(efficiency());
     if (u.pathname === "/api/share") return json(share());
+    if (u.pathname === "/api/export.csv") {
+      if (req.method === "HEAD") return send(200, "text/csv; charset=utf-8", "");
+      return exportCSV(res, (h) => res.writeHead(200, { ...SECURITY_HEADERS, ...h }), u.searchParams.get("data"), u.searchParams.get("range"));
+    }
     send(404, "text/plain", "not found");
   } catch (e) {
     log("http", e.message);
