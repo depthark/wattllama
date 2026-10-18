@@ -44,12 +44,16 @@ const CFG = {
   dataDir: path.resolve(DIR, process.env.DASH_DATA_DIR || "data"),
 };
 
+// .env: a later line for the same setting wins (as when you add one at the end, and as
+// install.ps1 / install.sh read it); a real environment variable wins over the file.
 function loadEnv(file) {
   if (!fs.existsSync(file)) return;
+  const vals = new Map();
   for (const line of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
     const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*?)\s*$/);
-    if (m && !(m[1] in process.env)) process.env[m[1]] = m[2].replace(/^"(.*)"$/, "$1");
+    if (m) vals.set(m[1], m[2].replace(/^"(.*)"$/, "$1"));
   }
+  for (const [k, v] of vals) if (!(k in process.env)) process.env[k] = v;
 }
 
 const log = (...a) => console.log(new Date().toISOString(), ...a);

@@ -34,7 +34,7 @@ if (-not (Test-Path $envFile)) {
     Write-Host 'Created .env from .env.example'
 }
 $port = 8091
-$m = Select-String -Path $envFile -Pattern '^\s*DASH_PORT\s*=\s*(\d+)' | Select-Object -First 1
+$m = Select-String -Path $envFile -Pattern '^\s*DASH_PORT\s*=\s*(\d+)' | Select-Object -Last 1
 if ($m) { $port = [int]$m.Matches[0].Groups[1].Value }
 
 if ($AllowLan) {

@@ -44,7 +44,7 @@ test("router: per-model tokens from the log, only loaded models polled", async (
 test("single server without a log: /metrics counters", async () => {
   let gen = 100;
   const srv = await mockServer({
-    "/models": { data: [{ id: "solo.gguf" }] },
+    "/models": { data: [{ id: "/home/someone/models/solo.gguf" }] },   // a single server names the model by its -m path
     "/metrics": () => `llamacpp:tokens_predicted_total ${gen}\nllamacpp:prompt_tokens_total 40\n`,
     "/slots": [{ id: 0, id_task: 1, is_processing: false }],
   });

@@ -24,12 +24,14 @@ export function create({ env, addTokens }) {
   let singleModel = null, last = { t: 0, models: [] };
 
   const kind = (m) => (m?.architecture?.output_modalities || ["text"]).join(",");
+  // A single server names its model by the -m path; show the file name, never the folders.
+  const modelId = (id) => id ? baseName(id) : "model";
 
   async function targets() {
     // Router: /models lists every model with status.value; single server: no status.
     const data = (await getJSON(`${url}/models`, { headers })).data || [];
     if (!data.some((m) => m.status)) {
-      singleModel = data[0]?.id || "model";
+      singleModel = modelId(data[0]?.id);
       kindOf.set(singleModel, kind(data[0]));
       return [{ id: singleModel, q: "" }];
     }
@@ -107,7 +109,7 @@ export function create({ env, addTokens }) {
         ctxTrain: m.meta?.n_ctx_train, params: m.meta?.n_params, size: m.meta?.size })) };
     }
     const p = await getJSON(`${url}/props`, { headers }).catch(() => ({}));
-    return { mode: "server", models: [{ id: data[0]?.id, status: "loaded", kind: kind(data[0]),
+    return { mode: "server", models: [{ id: modelId(data[0]?.id), status: "loaded", kind: kind(data[0]),
       args: [["model", baseName(p.model_path || "")], ["ctx-size", p.default_generation_settings?.n_ctx],
         ["build", p.build_info]].filter((x) => x[1]),
       ctxTrain: data[0]?.meta?.n_ctx_train, params: data[0]?.meta?.n_params, size: data[0]?.meta?.size }] };
