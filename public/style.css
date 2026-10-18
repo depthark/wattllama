@@ -1,3 +1,4 @@
+[hidden] { display: none !important; }
   :root {
     color-scheme: light;
     --bg: #f5f6f8; --panel: #ffffff; --line: #e2e5ea; --text: #12171d; --dim: #5d6875; --cell: #eceff3;
