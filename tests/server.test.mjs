@@ -4,7 +4,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import http from "node:http";
-import net from "node:net";
 import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
@@ -24,29 +23,28 @@ const LHM = { Text: "Sensor", Children: [{ Text: "PC", Children: [
   { Text: "AMD Ryzen 7 7700X", Children: [{ Text: "Temperatures", Children: [sensor("Core (Tctl/Tdie)", "71.3 °C", "/amdcpu/0/temperature/2")] }] },
 ] }] };
 
-const freePort = () => new Promise((ok) => { const s = net.createServer().listen(0, "127.0.0.1", () => { const p = s.address().port; s.close(() => ok(p)); }); });
-
 function request(port, { method = "GET", path: p = "/", headers = {} } = {}) {
   return new Promise((ok, fail) => {
     const r = http.request({ host: "127.0.0.1", port, method, path: p, headers }, (res) => {
       let body = ""; res.on("data", (d) => body += d); res.on("end", () => ok({ status: res.statusCode, headers: res.headers, body }));
     });
-    r.on("error", fail); r.end();
+    r.on("error", (e) => { e.message = `${method} ${p}: ${e.message}`; fail(e); }); r.end();
   });
 }
 
 test("server: security rules, endpoints, AMD GPU via LibreHardwareMonitor", { timeout: 60_000 }, async () => {
   const lhm = await mockServer({ "/data.json": LHM });
-  const port = await freePort();
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "wattllama-srv-"));
-  const env = { ...process.env, DASH_PORT: String(port), DASH_HOST: "127.0.0.1", DASH_DATA_DIR: dataDir, DASH_LHM_URL: lhm.url,
+  const env = { ...process.env, DASH_PORT: "0",   // the OS picks a free port; the server logs it (no race with parallel tests)
+    DASH_HOST: "127.0.0.1", DASH_DATA_DIR: dataDir, DASH_LHM_URL: lhm.url,
     DASH_LLAMA_URL: "", DASH_OLLAMA_URL: "", DASH_LMSTUDIO_URL: "", DASH_TOKEN: "", DASH_TASKS: "", DASH_ALLOW_POWER_LIMIT: "0",
     DASH_PRICE_PER_KWH: "6,5", DASH_CURRENCY: "CZK" };
   const srv = spawn(process.execPath, ["--no-warnings", path.join(ROOT, "server.mjs"), "--demo"], { env, stdio: ["ignore", "pipe", "pipe"] });
   let out = ""; srv.stdout.on("data", (d) => out += d); srv.stderr.on("data", (d) => out += d);
   try {
     for (let i = 0; i < 50 && !out.includes("WattLlama on"); i++) await new Promise((r) => setTimeout(r, 200));
-    assert.match(out, /WattLlama on/);
+    const port = Number(out.match(/WattLlama on http:\/\/127\.0\.0\.1:(\d+)/)?.[1]);
+    assert.ok(port > 0, "server reports its port");
 
     // DNS rebinding: a foreign Host header is refused
     assert.equal((await request(port, { path: "/api/live", headers: { host: "evil.example:1234" } })).status, 403);
@@ -106,6 +104,11 @@ test("server: security rules, endpoints, AMD GPU via LibreHardwareMonitor", { ti
     assert.equal(amd.limitMin, null, "no power-limit control for LHM GPUs");
     assert.ok(!live.gpus.some((g) => /Radeon\(TM\) Graphics/.test(g.name)), "integrated GPU is not counted twice");
     assert.equal(live.cpu === false || live.cpu?.temp == null || live.cpu.temp === 71.3, true);
+  } catch (e) {
+    e.message += `
+--- server output ---
+${out}`;
+    throw e;
   } finally {
     srv.kill(); lhm.close();
     await new Promise((r) => setTimeout(r, 300));

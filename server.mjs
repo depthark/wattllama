@@ -783,7 +783,7 @@ function tokenOk(req, u) {
   return given.some((g) => { const b = Buffer.from(decodeURIComponent(g)); return b.length === want.length && crypto.timingSafeEqual(b, want); });
 }
 
-http.createServer(async (req, res) => {
+const httpServer = http.createServer(async (req, res) => {
   const send = (code, type, body, extra = {}) => {
     res.writeHead(code, { ...SECURITY_HEADERS, "content-type": type, ...extra });
     res.end(req.method === "HEAD" ? undefined : body);
@@ -831,7 +831,8 @@ http.createServer(async (req, res) => {
   log(e.code === "EADDRINUSE" ? `port ${CFG.port} is in use: set DASH_PORT in .env` : `server: ${e.message}`);
   process.exit(1);
 }).listen(CFG.port, CFG.host, () => {
-  log(`WattLlama on http://${CFG.host}:${CFG.port}${TOKEN ? " (token required)" : ""}`);
+  // The real port (DASH_PORT=0 lets the OS pick one, as the tests do).
+  log(`WattLlama on http://${CFG.host}:${httpServer.address().port}${TOKEN ? " (token required)" : ""}`);
   if (CFG.host !== "127.0.0.1" && CFG.host !== "localhost" && !TOKEN) log("warning: reachable from the network without DASH_TOKEN");
 });
 
