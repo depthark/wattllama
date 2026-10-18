@@ -259,7 +259,7 @@ const addTokens = (model, gen, pp, req = 0) => {
 const wanted = (process.env.DASH_ENGINES || "auto").toLowerCase().split(",").map((s) => s.trim());
 const engines = ENGINES
   .filter((E) => wanted.includes("auto") || wanted.includes(E.name.toLowerCase()))
-  .map((E) => { try { return E.create({ env: process.env, addTokens, log, stream }); } catch (e) { log(`${E.name}: ${e.message}`); return null; } })
+  .map((E) => { try { return E.create({ env: process.env, addTokens, addRequest: (r) => saveRequest(E.name, r), log, stream }); } catch (e) { log(`${E.name}: ${e.message}`); return null; } })
   .filter(Boolean)
   .map((e) => Object.assign(e, { state: { reachable: false, retryAt: 0, models: [], tokenSource: "none" } }));
 
@@ -300,6 +300,18 @@ const upsert = db.prepare(`INSERT OR REPLACE INTO m (${M_COLS.join(",")}) VALUES
 const upsertMM = db.prepare(`INSERT OR REPLACE INTO mm VALUES (?,?,?,?,?,?,?)`);
 const insertRun = db.prepare(`INSERT OR REPLACE INTO runs VALUES (?,?,?,?,?,?,?,?)`);
 const alerts = createAlerts({ env: process.env, db, readDb: rdb, log });
+
+// Per-request details from the engines (llama.cpp / Ollama logs, LM Studio stats): numbers only,
+// each checked to be a sane non-negative number before it is stored.
+const insertRequest = db.prepare(`INSERT INTO requests (ts, model, engine, ctx, n_ctx, pp_tok, pp_ms, gen_tok, gen_ms, draft_acc, draft_gen, cached)
+  VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
+function saveRequest(engine, r) {
+  const n = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0 && v < 1e12 ? v : null;
+  try {
+    insertRequest.run(n(r.ts) ?? Date.now(), String(r.model || "").slice(0, 200), engine, n(r.ctx), n(r.nCtx), n(r.pp), n(r.ppMs),
+      n(r.gen), n(r.genMs), n(r.draftAcc), n(r.draftGen), n(r.cached));
+  } catch (e) { log("requests", e.message); }
+}
 let todayWh = { t: 0, wh: 0 };      // today's energy for the budget alerts, re-read once a minute
 const openRuns = new Map();
 const RUN_GAP_MS = 15_000;
@@ -365,6 +377,13 @@ function seedDemo() {
       insertRun.run(open.start, open.last, CHAT, open.active, open.wh, open.gen, open.pp, Math.round(open.active / 40));
       open = null;
     }
+  }
+  // Sample requests: generation slows and prefill speeds up with depth, MTP accepts ~65 %.
+  for (let i = 0; i < 400; i++) {
+    const ts = now - rnd() * 7 * 86400_000, ctx = Math.round(1500 + rnd() * rnd() * 60000), gen = Math.round(80 + rnd() * 900);
+    const pp = Math.round(rnd() < 0.7 ? 20 + rnd() * 400 : 2000 + rnd() * 20000), dacc = Math.round(gen * (0.55 + rnd() * 0.2));
+    insertRequest.run(ts, CHAT, "llama.cpp", ctx, 65536, pp, pp / (950 - ctx * 0.004 + rnd() * 80) * 1000,
+      gen, gen / (56 - ctx * 0.00022 - rnd() * 4) * 1000, dacc, Math.round(dacc / (0.6 + rnd() * 0.12)), Math.max(0, ctx - pp - gen));
   }
   db.exec("COMMIT");
   log("demo: seeded 14 days of sample history");
@@ -692,6 +711,18 @@ function exportCSV(res, sendHeaders, what, range) {
   res.end(chunk);
 }
 
+// Requests of one model (or all) in a fixed range, newest first, for the inference details.
+const REQ_RANGES = { "24h": 86400, "7d": 7 * 86400, "30d": 30 * 86400 };
+function requests(model, range) {
+  if (!REQ_RANGES[range]) range = "24h";
+  const from = Date.now() - REQ_RANGES[range] * 1000;
+  const rows = model
+    ? rdb.prepare("SELECT * FROM requests WHERE ts >= ? AND model = ? ORDER BY ts DESC LIMIT 3000").all(from, String(model).slice(0, 200))
+    : rdb.prepare("SELECT * FROM requests WHERE ts >= ? ORDER BY ts DESC LIMIT 3000").all(from);
+  const models = rdb.prepare("SELECT model, engine, COUNT(*) n FROM requests WHERE ts >= ? GROUP BY model, engine ORDER BY n DESC").all(from);
+  return { range, model: model || null, models, rows };
+}
+
 function runs(limit = 40) {
   const rows = rdb.prepare("SELECT * FROM runs ORDER BY start DESC LIMIT ?").all(limit);
   for (const [model, r] of openRuns) rows.unshift({ start: r.start, end: r.last, model, active_s: r.active,
@@ -817,6 +848,7 @@ const httpServer = http.createServer(async (req, res) => {
     if (u.pathname === "/api/heatmap") return json(heatmap(u.searchParams.get("days"), u.searchParams.get("model")));
     if (u.pathname === "/api/setup") return json(await setup());
     if (u.pathname === "/api/efficiency") return json(efficiency());
+    if (u.pathname === "/api/requests") return json(requests(u.searchParams.get("model"), u.searchParams.get("range")));
     if (u.pathname === "/api/alerts") return json({ active: alerts.active(), events: alerts.list(100), settings: alerts.settings() });
     if (u.pathname === "/api/share") return json(share());
     if (u.pathname === "/api/report") return json(report(u.searchParams.get("period")));

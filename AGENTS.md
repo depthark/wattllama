@@ -37,7 +37,9 @@ Ollama and LM Studio. One Node.js process, no npm dependencies, served on 127.0.
    the whole-PC energy during them go to that model's minute row (`mm`) and its open **run**. A
    run closes after 15 s without work, so an agent's tool-call pauses stay one run.
 3. Tokens arrive through `addTokens(model, generated, prompt, requests)` from the adapters and land
-   in the same minute and run.
+   in the same minute and run. Adapters that see whole requests (llama.cpp and Ollama logs via
+   `requestAssembler`, LM Studio stats) also call `addRequest()`: one `requests` row per request with
+   prefill / generation tokens and times, context depth, draft acceptance and cached prompt tokens.
 4. Every 10 s and at each new minute the bucket is written (`INSERT OR REPLACE`); a restart within
    a minute resumes that minute's rows (`resumeBucket`). `dt` is capped at 10 s, so a sleeping PC
    does not count as running.

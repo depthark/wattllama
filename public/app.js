@@ -42,7 +42,7 @@ async function refreshLive() {
     renderAlertBar(L.alerts || []);
     const asig = (L.alerts || []).map((a) => a.since).join();
     if (asig !== alertSig) { alertSig = asig; safe(refreshAlerts); }     // a new alert: notify now, not in 30 s
-    const sig = liveModels.map((x) => x.id + x.processing).join();
+    const sig = liveModels.map((x) => x.id + x.processing + (x.slots || []).map((s) => s.ctx).join("/")).join();
     if (sig !== liveSig) { liveSig = sig; renderModels(); }
   } catch { $("status").textContent = "dashboard not reachable"; }
 }
@@ -120,6 +120,8 @@ function renderModels() {
     return `<div class="card"><h3><span class="dot ${st[0]}"></span>${esc(st[1])}${m.kind && m.kind !== "text" ? ` · ${esc(m.kind)}` : ""}<span class="eng">${esc(m.engine)}</span></h3>
       <div style="font-weight:600;margin-bottom:4px;word-break:break-all">${esc(m.id)}</div>
       <div class="muted" style="font-size:12px;margin-bottom:8px">${[m.paramsText ? `${esc(m.paramsText)} params` : bn(m.params), gb(m.size), m.ctxTrain ? `trained ctx ${nf(m.ctxTrain)}` : ""].filter(Boolean).join(" · ")}</div>
+      ${(lv?.slots || []).filter((sl) => sl.nCtx).map((sl, i, all) => `<div class="ctxbar"><div class="row"><span>context${all.length > 1 ? ` slot ${i}` : ""}${sl.speculative ? " · speculative" : ""}</span>
+        <span>${nf(sl.ctx)} / ${nf(sl.nCtx)} (${Math.round(100 * sl.ctx / sl.nCtx)} %)</span></div>${bar(sl.ctx, sl.nCtx, sl.processing ? "--llm" : "--cpu")}</div>`).join("")}
       ${rows}<div style="margin-top:8px">${m.args.length ? chips(m.args.map(([k, v]) => v === "" ? esc(k) : `${esc(k)} <b>${esc(v)}</b>`), "k") : '<span class="muted">not loaded: parameters appear once it runs</span>'}</div>
     </div>`;
   }).join("");
@@ -246,6 +248,80 @@ async function refreshEfficiency() {
         <td class="n">${(r.gen / r.wh).toFixed(0)}</td><td class="n">${nf(r.minutes)}</td></tr>`).join("")
     : `<tr><td class="muted">Generate with different power limits and compare speed and energy per token here.</td></tr>`;
 }
+
+// ---------- inference details: per request speed, prefill, draft acceptance, cache ----------
+
+let reqRange = "24h", reqData = null;
+const median = (a) => { const v = a.filter((x) => x != null && Number.isFinite(x)).sort((x, y) => x - y); return v.length ? v[Math.floor(v.length / 2)] : null; };
+async function refreshRequests() {
+  const model = $("reqModel").value;
+  reqData = await get(`api/requests?range=${reqRange}${model ? `&model=${encodeURIComponent(model)}` : ""}`);
+  const sel = $("reqModel"), want = reqData.models.map((m) => m.model).join("|");
+  if (sel.dataset.ids !== want) {
+    const keep = sel.value;
+    sel.dataset.ids = want;
+    sel.innerHTML = `<option value="">All models</option>` + reqData.models.map((m) => `<option value="${esc(m.model)}">${esc(short(m.model))} (${esc(m.engine)})</option>`).join("");
+    sel.value = reqData.models.some((m) => m.model === keep) ? keep : "";
+  }
+  drawRequests();
+}
+function drawRequests() {
+  if (!reqData) return;
+  const R = reqData.rows;
+  const dec = R.filter((r) => r.gen_tok > 0 && r.gen_ms > 0).map((r) => ({ x: r.ctx, y: r.gen_tok / (r.gen_ms / 1000), r }));
+  const pre = R.filter((r) => r.pp_tok >= 16 && r.pp_ms > 0).map((r) => ({ x: r.ctx, y: r.pp_tok / (r.pp_ms / 1000), r }));
+  const dAcc = R.reduce((a, r) => a + (r.draft_acc || 0), 0), dGen = R.reduce((a, r) => a + (r.draft_gen || 0), 0);
+  const cached = R.reduce((a, r) => a + (r.cached || 0), 0), computed = R.reduce((a, r) => a + (r.pp_tok || 0), 0);
+  const card = (title, big, sub) => `<div class="card"><h3>${title}</h3><div class="big">${big}</div><div class="muted" style="font-size:12px">${sub}</div></div>`;
+  $("reqStats").innerHTML = !R.length
+    ? `<div class="card muted">No requests recorded yet. Exact per-request details come from the llama.cpp log (DASH_LLAMA_LOG), Ollama's log or LM Studio.</div>`
+    : [card("Requests", nf(R.length), `median context ${nf(median(R.map((r) => r.ctx)) || 0)} tokens`),
+      card("Generation", median(dec.map((p) => p.y))?.toFixed(1) ?? "–", "median tok/s"),
+      card("Prefill", median(pre.map((p) => p.y))?.toFixed(0) ?? "–", `median tok/s · first token ${median(R.map((r) => r.pp_ms)) != null ? (median(R.map((r) => r.pp_ms)) / 1000).toFixed(2) + " s" : "–"}`),
+      card("Speculative", dGen ? `${Math.round(100 * dAcc / dGen)} %` : "–", dGen ? `${nf(dAcc)} of ${nf(dGen)} drafted tokens accepted` : "no draft model / MTP"),
+      card("Prompt cache", cached + computed ? `${Math.round(100 * cached / (cached + computed))} %` : "–", "of prompt tokens reused, not recomputed"),
+    ].join("");
+  scatter($("cDecode"), dec, css("--llm"));
+  scatter($("cPrefill"), pre, css("--gpu"));
+  $("reqTable").innerHTML = R.length
+    ? `<tr><th>time</th><th>model</th><th class="n">context</th><th class="n">prompt new / cached</th><th class="n">prefill tok/s</th><th class="n">generated</th><th class="n">tok/s</th><th class="n">draft accepted</th></tr>`
+      + R.slice(0, 15).map((r) => `<tr><td>${when(r.ts)}</td><td>${esc(short(r.model))}</td><td class="n">${r.ctx != null ? nf(r.ctx) : "–"}${r.n_ctx ? ` <span class="muted">/ ${nf(r.n_ctx)}</span>` : ""}</td>
+        <td class="n">${nf(r.pp_tok || 0)} / ${r.cached != null ? nf(r.cached) : "–"}</td><td class="n">${r.pp_tok >= 16 && r.pp_ms ? nf(r.pp_tok / (r.pp_ms / 1000)) : "–"}</td>
+        <td class="n">${nf(r.gen_tok || 0)}</td><td class="n">${r.gen_ms ? (r.gen_tok / (r.gen_ms / 1000)).toFixed(1) : "–"}</td>
+        <td class="n">${r.draft_gen ? `${Math.round(100 * r.draft_acc / r.draft_gen)} %` : "–"}</td></tr>`).join("")
+    : "";
+}
+// x = context depth, y = tokens per second; hover shows the request.
+function scatter(cv, pts, color) {
+  const { g, w, h } = setup(cv);
+  const L = 48, R = 10, T = 6, B = 22, pw = w - L - R, ph = h - T - B;
+  const xmax = niceMax(Math.max(1000, ...pts.map((p) => p.x || 0))), ymax = niceMax(Math.max(1, ...pts.map((p) => p.y)));
+  const X = (v) => L + (v / xmax) * pw, Y = (v) => T + ph - (v / ymax) * ph;
+  g.font = "11px system-ui"; g.fillStyle = css("--dim"); g.strokeStyle = css("--line"); g.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) { const v = (ymax / 4) * i; g.beginPath(); g.moveTo(L, Y(v) + .5); g.lineTo(L + pw, Y(v) + .5); g.stroke(); g.fillText(Math.round(v), 4, Y(v) + 4); }
+  for (let i = 0; i <= 4; i++) { const v = (xmax / 4) * i; g.fillText(v >= 1000 ? `${+(v / 1000).toFixed(1)}k` : v, X(v) - 8, h - 6); }
+  g.fillStyle = color; g.globalAlpha = 0.7;
+  for (const p of pts) { g.beginPath(); g.arc(X(p.x || 0), Y(p.y), 2.6, 0, 7); g.fill(); }
+  g.globalAlpha = 1;
+  if (!pts.length) { g.fillStyle = css("--dim"); g.fillText("no data in this range", L + pw / 2 - 50, T + ph / 2); }
+  cv._scatter = { pts, X, Y };
+}
+for (const id of ["cDecode", "cPrefill"]) {
+  const cv = $(id), tip = cv.nextElementSibling;
+  cv.addEventListener("mousemove", (e) => {
+    const S = cv._scatter; if (!S) return;
+    const rect = cv.getBoundingClientRect(), mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    let best = null, bd = 1e9;
+    for (const p of S.pts) { const d = Math.hypot(S.X(p.x || 0) - mx, S.Y(p.y) - my); if (d < bd) { bd = d; best = p; } }
+    if (!best || bd > 12) { tip.style.display = "none"; return; }
+    tip.textContent = `${when(best.r.ts)} · ${short(best.r.model)} · ${nf(best.x || 0)} tokens deep · ${best.y.toFixed(1)} tok/s`;
+    tip.style.display = "block";
+    tip.style.left = Math.max(0, Math.min(mx + 14, rect.width - tip.offsetWidth - 4)) + "px"; tip.style.top = "26px";
+  });
+  cv.addEventListener("mouseleave", () => { tip.style.display = "none"; });
+}
+$("reqModel").addEventListener("change", () => safe(refreshRequests));
+pick("reqRange", "r", (r) => { reqRange = r; safe(refreshRequests); });
 
 // ---------- alerts: bar on top, rules and events, optional browser notifications ----------
 
@@ -485,7 +561,7 @@ $("tabs").addEventListener("click", (e) => {
   for (const x of $("tabs").children) x.classList.toggle("on", x === b);
   refreshSeries();
 });
-addEventListener("resize", drawAll);
+addEventListener("resize", () => { drawAll(); drawRequests(); });
 
 // ---------- day x hour heatmap ----------
 
@@ -570,7 +646,7 @@ matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { dr
 const safe = (f) => f().catch(() => {});
 async function fast() { if (!document.hidden) await safe(refreshLive); setTimeout(fast, 2000); }
 async function slow() {
-  if (!document.hidden) { await safe(refreshSummary); await safe(refreshSeries); await safe(refreshRuns); await safe(refreshHeat); await safe(refreshEfficiency); await safe(refreshShare); await safe(refreshReport); await safe(refreshAlerts); }
+  if (!document.hidden) { await safe(refreshSummary); await safe(refreshSeries); await safe(refreshRuns); await safe(refreshHeat); await safe(refreshEfficiency); await safe(refreshShare); await safe(refreshReport); await safe(refreshAlerts); await safe(refreshRequests); }
   setTimeout(slow, 30000);
 }
 async function slowest() { if (!document.hidden) await safe(refreshSetup); setTimeout(slowest, 60000); }

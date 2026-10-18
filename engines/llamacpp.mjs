@@ -8,11 +8,11 @@
 // In router mode only models that are already loaded are asked, because
 // /slots?model=X on an unloaded model would make the router load it.
 
-import { getJSON, tail, parseLlamaLine, slotPoller, rate, argPairs, baseName } from "./common.mjs";
+import { getJSON, tail, parseLlamaLine, slotPoller, requestAssembler, rate, argPairs, baseName } from "./common.mjs";
 
 export const name = "llama.cpp";
 
-export function create({ env, addTokens }) {
+export function create({ env, addTokens, addRequest = () => {} }) {
   const url = (env.DASH_LLAMA_URL ?? "http://127.0.0.1:8080").replace(/\/$/, "");
   if (!url) return null;
   const headers = env.DASH_LLAMA_API_KEY ? { authorization: `Bearer ${env.DASH_LLAMA_API_KEY}` } : {};
@@ -22,6 +22,8 @@ export function create({ env, addTokens }) {
   const slots = new Map();        // model -> slotPoller
   const metricState = new Map();
   let singleModel = null, last = { t: 0, models: [] };
+  const nCtx = new Map();         // model -> context size (from /slots)
+  const assemble = requestAssembler(addRequest, { nCtxOf: (m) => nCtx.get(m) ?? null });
 
   const kind = (m) => (m?.architecture?.output_modalities || ["text"]).join(",");
   // A single server names its model by the -m path; show the file name, never the folders.
@@ -55,6 +57,7 @@ export function create({ env, addTokens }) {
       const port = l.match(/^\[(\d+)\]/)?.[1];
       const model = port ? portModel.get(port) : singleModel;
       if (!model) continue;
+      assemble(model, kindOf.get(model) || "text", x);       // per-request details (log only)
       if (x.req) addTokens(model, 0, 0, 1);
       else if (x.gen != null) addTokens(model, x.gen, 0);
       else if (x.pp != null) addTokens(model, 0, x.pp);
@@ -92,7 +95,8 @@ export function create({ env, addTokens }) {
       if (!slots.has(t.id)) slots.set(t.id, slotPoller());
       const s = await slots.get(t.id)(`${url}/slots${t.q}`, headers);   // null: --no-slots
       if (s && !useLog) addTokens(t.id, metricsOk ? 0 : s.gen, 0, s.req);
-      models.push({ id: t.id, kind: kindOf.get(t.id) || "text", processing: !!s?.processing,
+      if (s?.nCtx) nCtx.set(t.id, s.nCtx);
+      models.push({ id: t.id, kind: kindOf.get(t.id) || "text", processing: !!s?.processing, slots: s?.slots || null,
         genRate: rate(prev.get(t.id)?.genRate, !!s?.processing, s?.gen || 0, dt) });
     }
     last = { t: now, models };

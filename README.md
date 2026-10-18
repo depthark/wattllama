@@ -47,6 +47,7 @@ so every client that talks to it is counted.
 |---|---|
 | ⚡ **Power** | Whole-PC watts (GPU, CPU package, RAM measured; rest + PSU loss estimated), history from 1 hour to 30 days, cumulative energy curve |
 | 🦙 **Every model separately** | llama.cpp (server or router), Ollama and LM Studio, several models and engines at once: live state, tok/s, requests, tokens in/out, busy time, energy while busy |
+| 🔬 **Inference details** | Per request: generation and prefill speed against context depth, time to first token, speculative-decoding (MTP / draft) acceptance, prompt-cache reuse; live context use per slot |
 | 🔥 **Heatmap** | Day × hour grid of tokens, energy or busy time for all models or one, 7 / 14 / 30 days |
 | 🌡️ **Hardware** | NVIDIA: temperature, fan, clocks, VRAM, P-state, PCIe link, *why it is throttled*. CPU load, effective clock, RAM, disk I/O. With [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor) (optional): CPU core temperatures, fans, SSDs, and **AMD Radeon / Intel Arc** GPU power |
 | 🎚️ **GPU power limit** | Optional: set the NVIDIA power limit from the page (UAC-confirmed, safe range) and compare efficiency per limit |
@@ -69,6 +70,7 @@ so every client that talks to it is counted.
 ![Hardware and power limit](docs/hardware.png)
 ![Models from llama.cpp and Ollama side by side, with their arguments](docs/models.png)
 ![Report per day and per model, with optional cost](docs/report.png)
+![Inference details: speed against context depth, draft acceptance, prompt cache](docs/inference.png)
 ![Share your result](docs/share.png)
 
 </details>

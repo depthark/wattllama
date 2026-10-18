@@ -114,6 +114,20 @@
     <div class="muted printonly" style="font-size:11px;margin-top:8px" id="reportNote"></div>
   </section>
 
+  <div class="report-head">
+    <h2 class="sec">Inference details</h2>
+    <div class="hd">
+      <select id="reqModel" class="sel" aria-label="Model"><option value="">All models</option></select>
+      <div class="tabs" id="reqRange" style="margin:0"><button data-r="24h" class="on">24 h</button><button data-r="7d">7 d</button><button data-r="30d">30 d</button></div>
+    </div>
+  </div>
+  <div class="grid" id="reqStats"></div>
+  <div class="grid2">
+    <div class="chart"><h4>Generation speed vs context depth (tok/s)</h4><canvas id="cDecode"></canvas><div class="tip"></div></div>
+    <div class="chart"><h4>Prefill speed vs context depth (tok/s)</h4><canvas id="cPrefill"></canvas><div class="tip"></div></div>
+  </div>
+  <div class="card scroll" style="margin-bottom:14px"><table id="reqTable"></table></div>
+
   <h2 class="sec noprint">Share your result</h2>
   <div class="card" id="shareCard">
     <div class="muted" style="font-size:13px;margin-bottom:8px">Add your PC to the <a href="https://github.com/depthark/wattllama/blob/main/RESULTS.md" target="_blank" rel="noopener noreferrer">community results</a>: how fast and how efficient local models are on real hardware.

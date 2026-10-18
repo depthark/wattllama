@@ -17,7 +17,8 @@ test("router: per-model tokens from the log, only loaded models polled", async (
   const log = tempFile("router.log");
   const sink = tokenSink();
   try {
-    const e = llamacpp.create({ env: { DASH_LLAMA_URL: srv.url, DASH_LLAMA_LOG: log.file }, addTokens: sink.addTokens });
+    const reqs = [];
+    const e = llamacpp.create({ env: { DASH_LLAMA_URL: srv.url, DASH_LLAMA_LOG: log.file }, addTokens: sink.addTokens, addRequest: (r) => reqs.push(r) });
     await e.poll();
     log.append([
       "[53459] I slot launch_slot_: id  0 | task 7 | processing task, is_child = 0",
@@ -32,6 +33,7 @@ test("router: per-model tokens from the log, only loaded models polled", async (
     assert.equal(r.tokenSource, "log");
     assert.deepEqual(sink.got.get("chat"), { gen: 150, pp: 19, req: 1 });
     assert.deepEqual(sink.got.get("cls"), { gen: 0, pp: 127, req: 1 });
+    assert.deepEqual(reqs.map((r) => [r.model, r.pp, r.gen, r.ctx]), [["cls", 127, undefined, 127], ["chat", 19, 150, 169]], "one record per request, per model");
     assert.ok(!slotsAsked.includes("big"), "an unloaded model must never be asked (the router would load it)");
     assert.deepEqual(r.models.map((m) => [m.id, m.processing, m.kind]), [["chat", true, "text"], ["cls", false, "decisions"]]);
 

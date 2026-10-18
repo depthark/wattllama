@@ -44,7 +44,7 @@ function findLms(env) {
   return fs.existsSync(exe) ? exe : null;
 }
 
-export function create({ env, addTokens, log }) {
+export function create({ env, addTokens, addRequest = () => {}, log }) {
   const url = (env.DASH_LMSTUDIO_URL ?? "http://127.0.0.1:1234").replace(/\/$/, "");
   if (!url) return null;
   const port = new URL(url).port || "1234";
@@ -68,6 +68,11 @@ export function create({ env, addTokens, log }) {
     if (st) {
       addTokens(e.model, Math.max(0, st.predictedTokensCount || 0), Math.max(0, st.promptTokensCount || 0));
       if (st.tokensPerSecond > 0) tps.set(e.model, st.tokensPerSecond);
+      // LM Studio's own per-prediction numbers: time to first token stands in for prefill time.
+      const gen = st.predictedTokensCount || 0, pp = st.promptTokensCount || 0;
+      addRequest({ ts: Date.now(), model: e.model, ctx: pp + gen || null, nCtx: null, pp, ppMs: st.timeToFirstTokenSec > 0 ? st.timeToFirstTokenSec * 1000 : null,
+        gen, genMs: st.tokensPerSecond > 0 ? gen / st.tokensPerSecond * 1000 : null,
+        draftAcc: st.acceptedDraftTokensCount ?? null, draftGen: st.totalDraftTokensCount ?? null, cached: null });
       // LM Studio (0.4) sends the input event only when the prediction is done, so no poll
       // sees it generating: count its exact duration instead.
       if (!seenBusy.has(e.model)) {

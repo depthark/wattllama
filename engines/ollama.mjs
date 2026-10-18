@@ -10,7 +10,7 @@ import { execFile, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { getJSON, tail, parseLlamaLine, slotPoller, rate, argPairs } from "./common.mjs";
+import { getJSON, tail, parseLlamaLine, slotPoller, requestAssembler, rate, argPairs } from "./common.mjs";
 
 export const name = "Ollama";
 
@@ -82,7 +82,7 @@ export function parseCmd(cmd) {
   return { hash, port, args: argPairs(flags.trim().split(/\s+/)) };
 }
 
-export function create({ env, addTokens }) {
+export function create({ env, addTokens, addRequest = () => {} }) {
   const url = baseUrl(env);
   if (!url) return null;
   const logFile = env.DASH_OLLAMA_LOG ?? defaultLog(env);
@@ -94,6 +94,8 @@ export function create({ env, addTokens }) {
     } }) : null;
   const blobOf = new Map();       // "name@digest" -> { hash, kind }
   const slots = new Map();        // port -> slotPoller
+  const nCtx = new Map();         // model -> context size (from the child's /slots)
+  const assemble = requestAssembler(addRequest, { nCtxOf: (m) => nCtx.get(m) ?? null });
   let last = { t: 0, models: [] }, scanned = false, psSig = "";
 
   // No log (e.g. "ollama serve" in a terminal): read the children's command lines from the
@@ -175,8 +177,9 @@ export function create({ env, addTokens }) {
         if (!slots.has(child.port)) slots.set(child.port, slotPoller());
         s = await slots.get(child.port)(`http://127.0.0.1:${child.port}/slots`, {});
       }
+      if (s?.nCtx) nCtx.set(m.name, s.nCtx);
       if (s && !useLog) addTokens(m.name, s.gen, 0, s.req);
-      models.push({ id: m.name, kind: b?.kind || "text", processing: !!s?.processing, child: !!child,
+      models.push({ id: m.name, kind: b?.kind || "text", processing: !!s?.processing, child: !!child, slots: s?.slots || null,
         genRate: rate(prev.get(m.name)?.genRate, !!s?.processing, s?.gen || 0, dt) });
     }
     // The log has no per-model prefix: lines go to the model that is (or just was)
@@ -185,6 +188,7 @@ export function create({ env, addTokens }) {
       const busy = models.filter((m) => m.processing || prev.get(m.id)?.processing);
       const to = (busy.length ? busy : models.filter((m) => m.child))[0] || models[0];
       if (to) for (const x of tokenLines) {
+        assemble(to.id, to.kind, x);
         if (x.req) addTokens(to.id, 0, 0, 1);
         else if (x.gen != null) addTokens(to.id, x.gen, 0);
         else if (x.pp != null) addTokens(to.id, 0, x.pp);

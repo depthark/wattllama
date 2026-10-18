@@ -32,33 +32,66 @@ export function tail(file) {
   };
 }
 
-// One llama-server log line -> what it says about tokens, or null.
-//   { req: 1 }        a request started on a slot
-//   { pp: n }         n prompt tokens were processed (print_timing)
-//   { gen: n }        n tokens were generated (print_timing)
-//   { release: n }    a slot finished with n tokens in its context; models that write no
-//                     text (classifiers, embeddings) print no timings, only this
+// One llama-server log line -> what it says, or null. "task" identifies the request.
+//   { req: 1 }                    a request started on a slot
+//   { pp: n, ms }                 n prompt tokens were processed in ms (print_timing)
+//   { gen: n, ms }                n tokens were generated in ms (print_timing)
+//   { draftAcc, draftGen }        speculative decoding: drafted tokens accepted / proposed
+//   { release: n }                the request ended with n tokens in its context; models that
+//                                 write no text (classifiers, embeddings) print only this
 // Works with and without llama.cpp's log prefix / timestamps and the router's [port] prefix.
 export function parseLlamaLine(l) {
   if (!l.includes("slot")) return null;
-  if (/launch_slot_.*processing task/.test(l)) return { req: 1 };
-  const m = l.match(/print_timing:.*\|\s+(prompt )?eval time =\s*[\d.]+ ms \/\s*(\d+) tokens/);
-  if (m) return m[1] ? { pp: Number(m[2]) } : { gen: Number(m[2]) };
+  const task = Number(l.match(/\btask (\d+)/)?.[1] ?? NaN);
+  const t = Number.isFinite(task) ? { task } : {};
+  if (/launch_slot_.*processing task/.test(l)) return { req: 1, ...t };
+  const m = l.match(/print_timing:.*\|\s+(prompt )?eval time =\s*([\d.]+) ms \/\s*(\d+) tokens/);
+  if (m) return m[1] ? { pp: Number(m[3]), ms: Number(m[2]), ...t } : { gen: Number(m[3]), ms: Number(m[2]), ...t };
+  const d = l.match(/print_timing:.*draft acceptance = [\d.]+ \(\s*(\d+) accepted \/\s*(\d+) generated\)/);
+  if (d) return { draftAcc: Number(d[1]), draftGen: Number(d[2]), ...t };
   const r = l.match(/release:.*n_tokens = (\d+)/);
-  if (r) return { release: Number(r[1]) };
+  if (r) return { release: Number(r[1]), ...t };
   return null;
 }
 
-// Polls a llama-server's /slots. Returns { processing, gen, req } since the last call
-// (gen = tokens decoded, approximate: /slots resets n_decoded when a request ends), or
-// null when the server has no /slots (--no-slots).
+// Collects the lines of one request (same model and task) into one record and hands it to
+// onRequest when the request ends: { ts, model, ctx, nCtx, pp, ppMs, gen, genMs, draftAcc,
+// draftGen, cached }. ctx = context depth at the end; cached = prompt tokens reused from the
+// cache (depth minus what was computed). Numbers only. Unfinished entries expire after 15 min.
+export function requestAssembler(onRequest, { nCtxOf = () => null, now = () => Date.now() } = {}) {
+  const open = new Map();
+  return (model, kind, x) => {
+    if (!x || x.task == null) return;
+    const key = `${model}\0${x.task}`;
+    let r = open.get(key);
+    if (!r) open.set(key, r = { ts: now(), model });
+    if (x.pp != null) { r.pp = x.pp; r.ppMs = x.ms; }
+    else if (x.gen != null) { r.gen = x.gen; r.genMs = x.ms; }
+    else if (x.draftAcc != null) { r.draftAcc = x.draftAcc; r.draftGen = x.draftGen; }
+    else if (x.release != null) {
+      open.delete(key);
+      if (r.genMs == null && r.ppMs == null && kind === "text") return;      // nothing measured
+      r.ctx = x.release;
+      if (kind !== "text" && r.pp == null) r.pp = x.release;               // classifiers: what they read
+      r.cached = Math.max(0, x.release - (r.pp ?? 0) - (r.gen ?? 0));
+      r.nCtx = nCtxOf(model);
+      onRequest(r);
+    }
+    if (open.size > 200) { const cut = now() - 15 * 60_000; for (const [k, v] of open) if (v.ts < cut) open.delete(k); }
+  };
+}
+
+// Polls a llama-server's /slots. Returns { processing, gen, req, nCtx, slots } since the last
+// call (gen = tokens decoded, approximate: /slots resets n_decoded when a request ends), or
+// null when the server has no /slots (--no-slots). slots = [{ processing, ctx, nCtx, speculative }].
 export function slotPoller() {
   const state = new Map();
   return async (url, headers) => {
     let slots;
     try { slots = await getJSON(`${url}`, { headers }); } catch { return null; }
     if (!Array.isArray(slots)) return null;
-    let processing = false, gen = 0, req = 0;
+    let processing = false, gen = 0, req = 0, nCtx = 0;
+    const out = [];
     for (const s of slots) {
       const nt = Array.isArray(s.next_token) ? s.next_token[0] : s.next_token;
       const dec = nt?.n_decoded ?? 0;
@@ -67,8 +100,11 @@ export function slotPoller() {
       else if (s.is_processing) { gen += dec; req++; }       // a new request, or a server seen for the first time
       state.set(s.id, { task: s.id_task, dec });
       if (s.is_processing) processing = true;
+      nCtx = Math.max(nCtx, s.n_ctx || 0);
+      out.push({ processing: !!s.is_processing, ctx: (s.n_prompt_tokens || 0) + (s.is_processing ? dec : 0),
+        nCtx: s.n_ctx || null, speculative: !!s.speculative });
     }
-    return { processing, gen, req };
+    return { processing, gen, req, nCtx: nCtx || null, slots: out };
   };
 }
 
