@@ -1,0 +1,829 @@
+// WattLlama: what your Windows PC draws, how much energy it used over time,
+// and how much of that went into local LLM generation (llama.cpp).
+//
+// Every 2 s, with no drivers and no admin rights:
+//   GPU      nvidia-smi (streaming), measured watts / temperature / VRAM, every NVIDIA card
+//   CPU+RAM  Windows "Energy Meter" (RAPL) counters via sampler.ps1, measured watts;
+//            without them, an estimate from CPU utilisation (DASH_CPU_MAX_W)
+//   rest     motherboard, disks, fans: DASH_REST_W, then the PSU loss (DASH_PSU_EFF)
+//   LLM      llama.cpp server or router: is it generating, how many tokens
+// One row per minute goes to SQLite (data/power.db); one page shows it.
+
+import http from "node:http";
+import { spawn, execFile } from "node:child_process";
+import os from "node:os";
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const [major, minor] = process.versions.node.split(".").map(Number);
+if (major < 22 || (major === 22 && minor < 13)) {
+  console.error(`Node.js 22.13 or newer is required (node:sqlite); this is ${process.version}.`);
+  process.exit(1);
+}
+const { DatabaseSync } = await import("node:sqlite");
+
+const DIR = path.dirname(fileURLToPath(import.meta.url));
+loadEnv(path.join(DIR, ".env"));
+
+const CFG = {
+  host: process.env.DASH_HOST || "127.0.0.1",
+  port: Number(process.env.DASH_PORT || 8091),
+  llamaUrl: (process.env.DASH_LLAMA_URL ?? "http://127.0.0.1:8080").replace(/\/$/, ""),
+  llamaLog: process.env.DASH_LLAMA_LOG || "",
+  restW: Number(process.env.DASH_REST_W || 35),
+  psuEff: Number(process.env.DASH_PSU_EFF || 0.88),
+  cpuMaxW: Number(process.env.DASH_CPU_MAX_W || 65),
+  intervalMs: Number(process.env.DASH_INTERVAL_MS || 2000),
+  dataDir: path.resolve(DIR, process.env.DASH_DATA_DIR || "data"),
+};
+
+function loadEnv(file) {
+  if (!fs.existsSync(file)) return;
+  for (const line of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
+    const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*?)\s*$/);
+    if (m && !(m[1] in process.env)) process.env[m[1]] = m[2].replace(/^"(.*)"$/, "$1");
+  }
+}
+
+const log = (...a) => console.log(new Date().toISOString(), ...a);
+const num = (s) => { const v = parseFloat(String(s).trim()); return Number.isFinite(v) ? v : null; };
+
+// ---------- streaming samplers ----------
+
+const children = new Set();
+process.on("exit", () => { for (const p of children) p.kill(); });
+
+function stream(name, cmd, args, onLine, { giveUpOnMissing = false } = {}) {
+  const start = () => {
+    let done = false;
+    const again = (why) => {
+      if (done) return;
+      done = true;
+      log(`${name} ${why}, restarting in 10 s`);
+      setTimeout(start, 10_000);
+    };
+    const p = spawn(cmd, args, { windowsHide: true });
+    children.add(p);
+    let buf = "";
+    p.stdout.on("data", (d) => {
+      buf += d;
+      let i;
+      while ((i = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, i).trim();
+        buf = buf.slice(i + 1);
+        if (line) { try { onLine(line); } catch (e) { log(`${name}: ${e.message}`); } }
+      }
+    });
+    p.on("exit", (code) => { children.delete(p); again(`exited (${code})`); });
+    p.on("error", (e) => {
+      if (giveUpOnMissing && e.code === "ENOENT") { done = true; log(`${name} not found, skipping`); return; }
+      again(`failed: ${e.message}`);
+    });
+  };
+  start();
+}
+
+const live = {
+  gpus: new Map(),       // index -> nvidia-smi reading, see below
+  cpu: null,             // { t, pkgW, dramW, util, mhz, zoneC, diskR, diskW, measured }
+  lhm: null,             // { t, groups: [{ hardware, sensors: [{ name, kind, value, unit }] }], cpuTemp }
+  llm: { t: 0, reachable: false, processing: false, models: [], tokenSource: "none" },
+  sysW: null,
+};
+
+// Lowest power limit WattLlama accepts: 60 % of the card's default, and never below the
+// driver's own minimum. The driver range is already safe (a power cap is not an undervolt:
+// it only slows the card down); the extra margin keeps it from feeling broken.
+const safeFloor = (min, def) => min == null ? null : Math.max(Math.ceil(min), def ? Math.ceil(def * 0.6 / 5) * 5 : 0);
+
+// nvidia-smi clocks_event_reasons bits: why the GPU is not at full clocks right now.
+const THROTTLE = [[0x4, "power cap"], [0x8, "HW slowdown"], [0x20, "thermal (SW)"], [0x40, "thermal (HW)"],
+  [0x80, "power brake"], [0x2, "app clocks"], [0x10, "sync boost"], [0x100, "display clocks"], [0x1, "idle"]];
+const throttleText = (hex) => {
+  const v = parseInt(hex, 16);
+  return Number.isFinite(v) && v ? THROTTLE.filter(([b]) => v & b).map(([, t]) => t) : [];
+};
+
+const GPU_FIELDS = ["index", "name", "temperature.gpu", "power.draw", "memory.used", "memory.total", "utilization.gpu",
+  "fan.speed", "clocks.sm", "clocks.mem", "power.limit", "power.default_limit", "power.min_limit", "power.max_limit",
+  "clocks_event_reasons.active", "pstate", "pcie.link.gen.current", "pcie.link.width.current", "utilization.memory"];
+stream("nvidia-smi", "nvidia-smi", [
+  `--query-gpu=${GPU_FIELDS.join(",")}`, "--format=csv,noheader,nounits", "-lms", String(CFG.intervalMs),
+], (line) => {
+  const f = line.split(",").map((s) => s.trim());
+  if (f.length < GPU_FIELDS.length) return;
+  const power = num(f[3]);
+  if (power == null) return;
+  live.gpus.set(f[0], { t: Date.now(), index: f[0], name: f[1], temp: num(f[2]), power,
+    vramUsed: num(f[4]), vramTotal: num(f[5]), util: num(f[6]), fan: num(f[7]), clockSm: num(f[8]), clockMem: num(f[9]),
+    limit: num(f[10]), limitDefault: num(f[11]), limitMin: num(f[12]), limitMax: num(f[13]),
+    throttle: throttleText(f[14]), pstate: f[15], pcie: num(f[16]) ? `Gen${f[16]} x${f[17]}` : null, memUtil: num(f[18]),
+    safeMin: safeFloor(num(f[12]), num(f[11])) });
+}, { giveUpOnMissing: true });
+
+stream("sampler", "powershell.exe", [
+  "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(DIR, "sampler.ps1"),
+  "-IntervalMs", String(CFG.intervalMs),
+], (line) => {
+  const [pkg, dram, util, mhz, zone, diskR, diskW] = line.split(",").map(num);
+  if (util == null && pkg == null) return;
+  const u = Math.min(util ?? 0, 100);
+  const measured = pkg != null;
+  // Without RAPL: idle ~15 % of the CPU's max package power, rising linearly with load.
+  const pkgW = measured ? pkg : CFG.cpuMaxW * (0.15 + 0.85 * u / 100);
+  live.cpu = { t: Date.now(), pkgW, dramW: dram ?? 0, util: u, mhz, zoneC: zone != null && zone > 0 && zone < 120 ? zone : null,
+    diskR, diskW, measured };
+});
+
+// Optional: LibreHardwareMonitor's web server (Options > Remote Web Server) has what
+// Windows does not give without a driver: CPU core temperatures, fans, motherboard,
+// SSD temperatures. Its data.json is a tree; leaves with a unit are sensors.
+const LHM_URL = (process.env.DASH_LHM_URL || "").replace(/\/$/, "");
+async function pollLHM() {
+  if (!LHM_URL) return;
+  try {
+    const root = await (await fetch(`${LHM_URL}/data.json`, { signal: AbortSignal.timeout(3000) })).json();
+    const groups = new Map();
+    const walk = (node, hardware, depth) => {
+      const hw = depth === 2 ? node.Text : hardware;      // root > computer > hardware > group > sensor
+      for (const c of node.Children || []) walk(c, hw, depth + 1);
+      if (node.Children?.length || !hw) return;
+      const m = String(node.Value || "").match(/^(-?[\d.,]+)\s*(°C|RPM|W|%|MHz|V|GB|MB|MB\/s|KB\/s)$/);
+      if (!m) return;
+      const unit = m[2], value = Number(m[1].replace(",", "."));
+      const kind = { "°C": "temperature", RPM: "fan", W: "power", "%": "load", MHz: "clock", V: "voltage" }[unit] || "data";
+      if (!["temperature", "fan"].includes(kind)) return;     // the rest is already measured above
+      if (!groups.has(hw)) groups.set(hw, []);
+      groups.get(hw).push({ name: node.Text, kind, value, unit });
+    };
+    walk(root, null, 0);
+    const all = [...groups.values()].flat();
+    // CPU temperature: Intel "CPU Package", AMD "Core (Tctl/Tdie)", else the hottest core.
+    const cpuGroup = [...groups].find(([hw]) => /intel|amd|ryzen|core|cpu/i.test(hw) && !/nvidia|radeon rx|geforce/i.test(hw));
+    const cpuSensors = cpuGroup ? cpuGroup[1].filter((s) => s.kind === "temperature") : [];
+    const pkg = cpuSensors.find((s) => /package|tctl|tdie/i.test(s.name)) || cpuSensors.sort((a, b) => b.value - a.value)[0];
+    live.lhm = { t: Date.now(), cpuTemp: pkg?.value ?? null, count: all.length,
+      groups: [...groups].map(([hardware, sensors]) => ({ hardware, sensors })) };
+  } catch {
+    live.lhm = live.lhm && Date.now() - live.lhm.t < 30_000 ? live.lhm : null;
+  }
+}
+if (LHM_URL) setInterval(pollLHM, 5000);
+
+function gpuTotals(now) {
+  let power = 0, temp = null, vramUsed = 0, vramTotal = 0, util = 0, n = 0, limit = 0, fan = null;
+  for (const g of live.gpus.values()) {
+    if (now - g.t > 15_000) continue;
+    n++; power += g.power; vramUsed += g.vramUsed ?? 0; vramTotal += g.vramTotal ?? 0; limit += g.limit ?? 0;
+    util = Math.max(util, g.util ?? 0);
+    if (g.fan != null) fan = Math.max(fan ?? 0, g.fan);
+    if (g.temp != null) temp = Math.max(temp ?? 0, g.temp);
+  }
+  return n ? { n, power, temp, vramUsed, vramTotal, util, limit, fan } : null;
+}
+
+// ---------- llama.cpp ----------
+//
+// Works with a single llama-server and with router mode (--models-dir / presets).
+// "Generating" comes from /slots. Token counts, best source first:
+//   1. DASH_LLAMA_LOG: the server's log file; exact (print_timing lines)
+//   2. /metrics (server started with --metrics); exact
+//   3. /slots; approximate, the last moments of each reply are missed
+// In router mode only models that are already loaded are asked, because
+// /slots?model=X on an unloaded model would make the router load it.
+//
+
+// Everything is tracked per model: a router can run several at once (a chat model
+// on the GPU next to a small classifier on the CPU), and each gets its own status,
+// tokens, busy time and runs.
+
+const pending = new Map();          // model -> { gen, pp, req } not yet written
+const addTokens = (model, gen, pp, req = 0) => {
+  const p = pending.get(model) || { gen: 0, pp: 0, req: 0 };
+  p.gen += gen; p.pp += pp; p.req += req; pending.set(model, p);
+};
+const kindOf = new Map();           // model -> output modalities ("text", "decisions", ...)
+const slotState = new Map();
+const metricState = new Map();
+const portModel = new Map();        // router child port -> model id (log lines start with [port])
+let logPos = null, logRest = "", singleModel = null;
+
+// A server started with --api-key needs it on every request (DASH_LLAMA_API_KEY).
+const llamaHeaders = process.env.DASH_LLAMA_API_KEY ? { authorization: `Bearer ${process.env.DASH_LLAMA_API_KEY}` } : {};
+
+async function getJSON(url) {
+  const r = await fetch(url, { headers: llamaHeaders, signal: AbortSignal.timeout(3000) });
+  if (!r.ok) throw Object.assign(new Error(`${r.status}`), { status: r.status });
+  return r.json();
+}
+
+async function targets() {
+  // Router: /models lists every model with status.value; single server: no status.
+  const j = await getJSON(`${CFG.llamaUrl}/models`);
+  const data = j.data || [];
+  if (!data.some((m) => m.status)) {
+    singleModel = data[0]?.id || "model";
+    return [{ id: singleModel, q: "", kind: (data[0]?.architecture?.output_modalities || ["text"]).join(",") }];
+  }
+  singleModel = null;
+  const loaded = data.filter((m) => m.status?.value === "loaded");
+  for (const m of loaded) {
+    kindOf.set(m.id, (m.architecture?.output_modalities || ["text"]).join(","));
+    const a = m.status.args || [];
+    const i = a.indexOf("--port");
+    if (i >= 0) portModel.set(String(a[i + 1]), m.id);
+  }
+  return loaded.map((m) => ({ id: m.id, q: `?model=${encodeURIComponent(m.id)}`,
+    kind: (m.architecture?.output_modalities || ["text"]).join(",") }));
+}
+
+function readLog() {
+  let size;
+  try { size = fs.statSync(CFG.llamaLog).size; } catch { return false; }
+  if (logPos == null || size < logPos) { logPos = logPos == null ? size : 0; logRest = ""; }
+  if (size > logPos) {
+    const fd = fs.openSync(CFG.llamaLog, "r");
+    try {
+      const buf = Buffer.alloc(Math.min(size - logPos, 4 << 20));
+      fs.readSync(fd, buf, 0, buf.length, logPos);
+      logPos += buf.length;
+      const lines = (logRest + buf.toString("utf8")).split("\n");
+      logRest = lines.pop();
+      for (const l of lines) {
+        if (!l.includes(" slot ")) continue;
+        const port = l.match(/^\[(\d+)\]/)?.[1];
+        const model = port ? portModel.get(port) : singleModel;
+        if (!model) continue;
+        if (/launch_slot_.*processing task/.test(l)) { addTokens(model, 0, 0, 1); continue; }
+        const m = l.match(/print_timing:.*\|\s+(prompt )?eval time =\s*[\d.]+ ms \/\s*(\d+) tokens/);
+        if (m) { if (m[1]) addTokens(model, 0, Number(m[2])); else addTokens(model, Number(m[2]), 0); continue; }
+        // Models that write no text (classifiers, embeddings) print no timings:
+        // count the tokens they read from the release line instead.
+        const r = l.match(/release:.*n_tokens = (\d+)/);
+        if (r && (kindOf.get(model) || "text") !== "text") addTokens(model, 0, Number(r[1]));
+      }
+    } finally { fs.closeSync(fd); }
+  }
+  return true;
+}
+
+async function readMetrics(t) {
+  let text;
+  try {
+    const r = await fetch(`${CFG.llamaUrl}/metrics${t.q}`, { headers: llamaHeaders, signal: AbortSignal.timeout(3000) });
+    if (!r.ok) return false;
+    text = await r.text();
+  } catch { return false; }
+  const val = (name) => Number(text.match(new RegExp(`^llamacpp:${name}\\s+([\\d.e+]+)`, "m"))?.[1] ?? NaN);
+  const gen = val("tokens_predicted_total"), pp = val("prompt_tokens_total");
+  if (!Number.isFinite(gen)) return false;
+  const prev = metricState.get(t.id);
+  if (prev) {   // a counter that went down means the model was reloaded
+    addTokens(t.id, gen >= prev.gen ? gen - prev.gen : gen, pp >= prev.pp ? pp - prev.pp : pp);
+  }
+  metricState.set(t.id, { gen, pp });
+  return true;
+}
+
+async function pollLLM() {
+  if (!CFG.llamaUrl) return;
+  try {
+    const list = await targets();
+    const useLog = CFG.llamaLog && readLog();
+    const now = Date.now();
+    const prev = new Map((live.llm.models || []).map((m) => [m.id, m]));
+    const models = [];
+    let anyMetrics = false;
+    for (const t of list) {
+      const metricsOk = !useLog && (await readMetrics(t));
+      anyMetrics ||= metricsOk;
+      let processing = false, slotGen = 0, slotReq = 0;
+      try {
+        for (const s of await getJSON(`${CFG.llamaUrl}/slots${t.q}`)) {
+          const nt = Array.isArray(s.next_token) ? s.next_token[0] : s.next_token;
+          const dec = nt?.n_decoded ?? 0;
+          const key = `${t.id}:${s.id}`;
+          const st = slotState.get(key);
+          if (s.is_processing && st && st.task === s.id_task) slotGen += Math.max(0, dec - st.dec);
+          else if (s.is_processing && st) { slotGen += dec; slotReq++; }
+          slotState.set(key, { task: s.id_task, dec });
+          if (s.is_processing) processing = true;
+        }
+      } catch {}   // server started with --no-slots: no activity for this model
+      if (!useLog) addTokens(t.id, metricsOk ? 0 : slotGen, 0, slotReq);
+      const p = prev.get(t.id), dt = (now - (live.llm.t || now)) / 1000;
+      const rate = dt > 0 ? slotGen / dt : 0;
+      models.push({ id: t.id, kind: t.kind, processing,
+        genRate: processing ? (p?.processing ? 0.5 * p.genRate + 0.5 * rate : rate) : 0 });
+    }
+    const tokenSource = useLog ? "log" : anyMetrics ? "metrics" : list.length ? "slots" : "none";
+    live.llm = { t: now, reachable: true, processing: models.some((m) => m.processing), models, tokenSource };
+  } catch {
+    live.llm = { t: Date.now(), reachable: false, processing: false, models: [], tokenSource: "none" };
+  }
+}
+
+// ---------- minute rows ----------
+
+// --demo: a separate database pre-filled with 14 days of made-up history, so the page can
+// be tried (and screenshotted) right away. Live numbers are still real.
+const DEMO = process.argv.includes("--demo");
+fs.mkdirSync(CFG.dataDir, { recursive: true });
+const db = new DatabaseSync(DEMO ? ":memory:" : path.join(CFG.dataDir, "power.db"));
+// m: the whole PC per minute (active_s / gen_tok = any model).
+db.exec(`CREATE TABLE IF NOT EXISTS m (
+  ts INTEGER PRIMARY KEY, secs REAL, gpu_w REAL, cpu_w REAL, dram_w REAL, sys_w REAL,
+  gpu_t REAL, gpu_tmax REAL, gpu_util REAL, cpu_util REAL, vram REAL,
+  active_s REAL, wh REAL, wh_active REAL, wh_gpu REAL, gen_tok INTEGER, pp_tok INTEGER)`);
+// mm: each model per minute. wh = whole-PC energy while that model was busy.
+db.exec(`CREATE TABLE IF NOT EXISTS mm (
+  ts INTEGER, model TEXT, active_s REAL, wh REAL, gen_tok INTEGER, pp_tok INTEGER, req INTEGER DEFAULT 0, PRIMARY KEY (ts, model))`);
+// runs: one row per generation run of a model, from its first busy poll until 15 s
+// without generating, so an agent's short pauses between tool calls stay one run.
+db.exec(`CREATE TABLE IF NOT EXISTS runs (
+  start INTEGER, end INTEGER, model TEXT, active_s REAL, wh REAL, gen_tok INTEGER, pp_tok INTEGER, req INTEGER DEFAULT 0, PRIMARY KEY (start, model))`);
+// Databases from older versions: add the columns that came later.
+// m extras: CPU temperature (LibreHardwareMonitor, null without it), GPU power limit,
+// GPU fan %, effective CPU clock, RAM in use (MB).
+const M_COLS = ["ts", "secs", "gpu_w", "cpu_w", "dram_w", "sys_w", "gpu_t", "gpu_tmax", "gpu_util", "cpu_util", "vram",
+  "active_s", "wh", "wh_active", "wh_gpu", "gen_tok", "pp_tok", "cpu_t", "cpu_tmax", "gpu_pl", "gpu_fan", "cpu_mhz", "ram_used"];
+for (const [table, col, def] of [["mm", "req", "INTEGER DEFAULT 0"], ["runs", "req", "INTEGER DEFAULT 0"],
+  ["m", "cpu_t", "REAL"], ["m", "cpu_tmax", "REAL"], ["m", "gpu_pl", "REAL"], ["m", "gpu_fan", "REAL"], ["m", "cpu_mhz", "REAL"], ["m", "ram_used", "REAL"]]) {
+  if (!db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+}
+const upsert = db.prepare(`INSERT OR REPLACE INTO m (${M_COLS.join(",")}) VALUES (${M_COLS.map(() => "?").join(",")})`);
+const upsertMM = db.prepare(`INSERT OR REPLACE INTO mm VALUES (?,?,?,?,?,?,?)`);
+const insertRun = db.prepare(`INSERT OR REPLACE INTO runs VALUES (?,?,?,?,?,?,?,?)`);
+const openRuns = new Map();
+const RUN_GAP_MS = 15_000;
+
+function closeRun(model) {
+  const r = openRuns.get(model);
+  if (r) insertRun.run(r.start, r.last, model, r.active, r.wh, r.gen, r.pp, r.req);
+  openRuns.delete(model);
+}
+const closeAllRuns = () => { for (const m of [...openRuns.keys()]) closeRun(m); };
+
+const newBucket = (ts) => ({ ts, secs: 0, gpuW: 0, cpuW: 0, dramW: 0, sysW: 0, gpuT: 0, gpuTmax: 0,
+  gpuUtil: 0, cpuUtil: 0, vram: 0, active: 0, wh: 0, whActive: 0, whGpu: 0, gen: 0, pp: 0, models: new Map(),
+  cpuT: 0, cpuTsecs: 0, cpuTmax: null, gpuPl: 0, gpuFan: 0, cpuMhz: 0, ram: 0 });
+const modelBucket = () => ({ active: 0, wh: 0, gen: 0, pp: 0, req: 0 });
+
+// A restart inside a minute continues that minute's rows instead of overwriting them.
+function resumeBucket(ts) {
+  const b = newBucket(ts);
+  for (const r of db.prepare("SELECT * FROM mm WHERE ts = ?").all(ts)) {
+    b.models.set(r.model, { active: r.active_s, wh: r.wh, gen: r.gen_tok, pp: r.pp_tok, req: r.req || 0 });
+  }
+  const r = db.prepare("SELECT * FROM m WHERE ts = ?").get(ts);
+  if (!r) return b;
+  const s = r.secs;
+  return Object.assign(b, { secs: s, gpuW: r.gpu_w * s, cpuW: r.cpu_w * s, dramW: r.dram_w * s, sysW: r.sys_w * s,
+    gpuT: r.gpu_t * s, gpuTmax: r.gpu_tmax, gpuUtil: r.gpu_util * s, cpuUtil: r.cpu_util * s, vram: r.vram,
+    active: r.active_s, wh: r.wh, whActive: r.wh_active, whGpu: r.wh_gpu, gen: r.gen_tok, pp: r.pp_tok,
+    cpuT: (r.cpu_t ?? 0) * s, cpuTsecs: r.cpu_t == null ? 0 : s, cpuTmax: r.cpu_tmax, gpuPl: (r.gpu_pl ?? 0) * s,
+    gpuFan: (r.gpu_fan ?? 0) * s, cpuMhz: (r.cpu_mhz ?? 0) * s, ram: r.ram_used ?? 0 });
+}
+
+if (DEMO) seedDemo();
+
+function seedDemo() {
+  let seed = 7;
+  const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const now = Math.floor(Date.now() / 60_000) * 60_000;
+  const CHAT = "Qwen3.6-35B-A3B-Q4_K_M", SMALL = "d1-3B-Q4_K_M";
+  db.exec("BEGIN");
+  let open = null;
+  for (let ts = now - 14 * 86400_000; ts < now; ts += 60_000) {
+    const d = new Date(ts), h = d.getHours() + d.getMinutes() / 60, day = d.getDay();
+    if (h > 1.5 && h < 8 && rnd() > 0.02) continue;                 // PC off at night
+    const busyP = (day === 0 || day === 6 ? 0.5 : 0.3) * (Math.sin((h - 9) / 24 * 2 * Math.PI) * 0.5 + 0.5) + (h > 20 ? 0.25 : 0);
+    const busy = open ? rnd() > 0.15 : rnd() < busyP * 0.25;
+    const act = busy ? 30 + rnd() * 30 : 0;
+    const small = busy && rnd() < 0.3 ? 2 + rnd() * 4 : 0;
+    const gpu = 16 + (act / 60) * (150 + rnd() * 40), cpu = 12 + rnd() * 6 + (act / 60) * (40 + rnd() * 20) + small, dram = 1.3 + (act / 60);
+    const sys = (gpu + cpu + dram + CFG.restW) / CFG.psuEff, wh = sys / 60, gen = Math.round(act * (45 + rnd() * 15));
+    const pp = act ? Math.round(rnd() * 3000) : 0, spp = Math.round(small * 60);
+    const cpuT = 38 + (act / 60) * 24 + rnd() * 4;
+    upsert.run(ts, 60, gpu, cpu, dram, sys, 42 + (act / 60) * 22, 44 + (act / 60) * 24, act / 60 * 90, 8 + act / 60 * 40,
+      11800, Math.max(act, small), wh, act || small ? wh : 0, gpu / 60, gen + (small ? 2 : 0), pp + spp,
+      cpuT, cpuT + 6, 200, act ? 35 + rnd() * 20 : 0, 2400 + (act / 60) * 1800, 19000 + rnd() * 1500);
+    if (act) upsertMM.run(ts, CHAT, act, wh, gen, pp, 1);
+    if (small) upsertMM.run(ts, SMALL, small, wh * small / 60, 0, spp, 3);
+    if (busy) {
+      open ??= { start: ts, active: 0, wh: 0, gen: 0, pp: 0 };
+      Object.assign(open, { last: ts + 60_000, active: open.active + act, wh: open.wh + wh, gen: open.gen + gen, pp: open.pp + pp });
+      if (small) insertRun.run(ts + 5000, ts + 5000 + small * 1000, SMALL, small, wh * small / 60, 0, spp, 3);
+    } else if (open) {
+      insertRun.run(open.start, open.last, CHAT, open.active, open.wh, open.gen, open.pp, Math.round(open.active / 40));
+      open = null;
+    }
+  }
+  db.exec("COMMIT");
+  log("demo: seeded 14 days of sample history");
+}
+
+let bucket = null;
+function flush() {
+  const b = bucket;
+  if (!b || b.secs <= 0) return;
+  const avg = (v) => v / b.secs;
+  upsert.run(b.ts, b.secs, avg(b.gpuW), avg(b.cpuW), avg(b.dramW), avg(b.sysW), avg(b.gpuT), b.gpuTmax,
+    avg(b.gpuUtil), avg(b.cpuUtil), b.vram, b.active, b.wh, b.whActive, b.whGpu, b.gen, b.pp,
+    b.cpuTsecs ? b.cpuT / b.cpuTsecs : null, b.cpuTmax, avg(b.gpuPl) || null, avg(b.gpuFan), avg(b.cpuMhz) || null, b.ram);
+  for (const [model, x] of b.models) upsertMM.run(b.ts, model, x.active, x.wh, x.gen, x.pp, x.req);
+}
+
+let lastTick = Date.now();
+async function tick() {
+  await pollLLM();
+  const now = Date.now();
+  const dt = Math.min((now - lastTick) / 1000, 10);   // a sleeping PC must not count as running
+  lastTick = now;
+  const c = live.cpu;
+  if (!c || now - c.t > 15_000) return;
+  const g = gpuTotals(now);
+  const gpuW = g?.power ?? 0;
+
+  const sysW = (gpuW + c.pkgW + c.dramW + CFG.restW) / CFG.psuEff;
+  live.sysW = sysW;
+  const ts = Math.floor(now / 60_000) * 60_000;
+  if (!bucket || bucket.ts !== ts) { flush(); bucket = resumeBucket(ts); }
+  const b = bucket;
+  b.secs += dt;
+  b.gpuW += gpuW * dt; b.cpuW += c.pkgW * dt; b.dramW += c.dramW * dt; b.sysW += sysW * dt;
+  b.gpuT += (g?.temp ?? 0) * dt; b.gpuTmax = Math.max(b.gpuTmax, g?.temp ?? 0);
+  b.gpuUtil += (g?.util ?? 0) * dt; b.cpuUtil += c.util * dt; b.vram = Math.max(b.vram, g?.vramUsed ?? 0);
+  b.gpuPl += (g?.limit ?? 0) * dt; b.gpuFan += (g?.fan ?? 0) * dt; b.cpuMhz += (c.mhz ?? 0) * dt;
+  b.ram = Math.max(b.ram, (os.totalmem() - os.freemem()) / 1048576);
+  const cpuT = live.lhm && now - live.lhm.t < 15_000 ? live.lhm.cpuTemp : null;
+  if (cpuT != null) { b.cpuT += cpuT * dt; b.cpuTsecs += dt; b.cpuTmax = Math.max(b.cpuTmax ?? 0, cpuT); }
+  const wh = (sysW * dt) / 3600;
+  b.wh += wh; b.whGpu += (gpuW * dt) / 3600;
+  if (live.llm.processing) { b.active += dt; b.whActive += wh; }
+
+  const mb = (id) => { let x = b.models.get(id); if (!x) b.models.set(id, x = modelBucket()); return x; };
+  for (const m of live.llm.models || []) {
+    if (m.processing) {
+      const x = mb(m.id); x.active += dt; x.wh += wh;
+      let r = openRuns.get(m.id);
+      if (!r) openRuns.set(m.id, r = { start: now, last: now, active: 0, wh: 0, gen: 0, pp: 0, req: 0 });
+      r.last = now; r.active += dt; r.wh += wh;
+    }
+  }
+  for (const [id, r] of openRuns) if (now - r.last > RUN_GAP_MS) closeRun(id);
+  for (const [id, p] of pending) {     // log lines land just after a reply ends
+    const x = mb(id); x.gen += p.gen; x.pp += p.pp; x.req += p.req;
+    b.gen += p.gen; b.pp += p.pp;
+    const r = openRuns.get(id);
+    if (r) { r.gen += p.gen; r.pp += p.pp; r.req += p.req; }
+  }
+  pending.clear();
+}
+
+setInterval(() => { tick().catch((e) => log("tick", e.message)); }, CFG.intervalMs);
+setInterval(() => { try { flush(); } catch (e) { log("flush", e.message); } }, 10_000);
+
+// ---------- queries ----------
+
+const RANGES = { "1h": [3600, 60], "6h": [6 * 3600, 60], "24h": [86400, 300], "7d": [7 * 86400, 1800], "30d": [30 * 86400, 7200] };
+
+function series(range) {
+  if (!RANGES[range]) range = "24h";
+  const [span, step] = RANGES[range];
+  const from = Date.now() - span * 1000, stepMs = step * 1000;
+  const rows = db.prepare(`SELECT (ts / ${stepMs}) * ${stepMs} AS t, SUM(secs) s,
+      SUM(gpu_w*secs)/SUM(secs) gpu, SUM((cpu_w+dram_w)*secs)/SUM(secs) cpu, SUM(sys_w*secs)/SUM(secs) sys,
+      MAX(gpu_tmax) tmax, SUM(gpu_t*secs)/SUM(secs) tavg, SUM(active_s) act,
+      MAX(cpu_tmax) ctmax, AVG(cpu_t) ctavg, AVG(gpu_pl) pl, AVG(gpu_fan) fan, AVG(cpu_mhz) mhz, MAX(ram_used) ram,
+      SUM(wh) wh, SUM(wh_active) wha, SUM(gen_tok) gen
+    FROM m WHERE ts >= ? GROUP BY t ORDER BY t`).all(from);
+  return { range, step, from, rows };
+}
+
+// Day x hour grid in local time (DST: a repeated hour adds into the same cell).
+// model: one model's tokens / busy time / energy while busy; empty = all models.
+function heatmap(days, model) {
+  days = Math.min(Math.max(Number(days) || 7, 1), 90);
+  const start = new Date(); start.setHours(0, 0, 0, 0); start.setDate(start.getDate() - (days - 1));
+  const rows = model
+    ? db.prepare("SELECT ts, gen_tok, wh AS wh_active, active_s, 0 AS wh FROM mm WHERE ts >= ? AND model = ?").all(start.getTime(), model)
+    : db.prepare("SELECT ts, gen_tok, wh, wh_active, active_s FROM m WHERE ts >= ?").all(start.getTime());
+  const key = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const map = new Map();
+  for (let i = 0; i < days; i++) {
+    const d = new Date(start); d.setDate(start.getDate() + i);
+    map.set(key(d), Array.from({ length: 24 }, () => ({ gen: 0, wh: 0, wha: 0, act: 0 })));
+  }
+  for (const r of rows) {
+    const d = new Date(r.ts), cell = map.get(key(d))?.[d.getHours()];
+    if (!cell) continue;
+    cell.gen += r.gen_tok; cell.wh += model ? r.wh_active : r.wh; cell.wha += r.wh_active; cell.act += r.active_s;
+  }
+  return { model: model || null, days: [...map].reverse().map(([date, hours]) => ({ date, hours })) };
+}
+
+// Idle baseline: 20th percentile of whole minutes with no generation, last 7 days.
+function idleBaseline() {
+  const v = db.prepare(`SELECT sys_w FROM m WHERE ts >= ? AND active_s = 0 AND secs >= 50 ORDER BY sys_w`)
+    .all(Date.now() - 7 * 86400_000).map((r) => r.sys_w);
+  return v.length >= 5 ? v[Math.floor(v.length * 0.2)] : null;
+}
+
+function period(from, to = Date.now() + 60_000) {
+  return db.prepare(`SELECT COALESCE(SUM(secs),0) secs, COALESCE(SUM(wh),0) wh, COALESCE(SUM(wh_active),0) wha,
+      COALESCE(SUM(active_s),0) act, COALESCE(SUM(gen_tok),0) gen, COALESCE(SUM(pp_tok),0) pp
+    FROM m WHERE ts >= ? AND ts < ?`).get(from, to);
+}
+
+// Per model: tokens, busy time and whole-PC energy while it was busy.
+function perModel(from) {
+  return db.prepare(`SELECT model, SUM(active_s) act, SUM(wh) wh, SUM(gen_tok) gen, SUM(pp_tok) pp, SUM(req) req
+    FROM mm WHERE ts >= ? GROUP BY model ORDER BY SUM(active_s) DESC`).all(from);
+}
+
+function summary() {
+  const d = new Date(); d.setHours(0, 0, 0, 0);
+  const today = d.getTime();
+  return {
+    models: { today: perModel(today), week: perModel(Date.now() - 7 * 86400_000), all: perModel(0) },
+    restW: CFG.restW, psuEff: CFG.psuEff, idleW: idleBaseline(),
+    first: db.prepare("SELECT MIN(ts) t FROM m").get().t,
+    today: period(today), yesterday: period(today - 86400_000, today),
+    week: period(Date.now() - 7 * 86400_000),
+    month: period(new Date(d.getFullYear(), d.getMonth(), 1).getTime()), all: period(0),
+  };
+}
+
+function liveView() {
+  const now = Date.now();
+  const c = live.cpu;
+  const fresh = (x) => x && now - x.t < 15_000;
+  return {
+    t: now, sysW: live.sysW,
+    gpu: gpuTotals(now),
+    gpus: [...live.gpus.values()].filter(fresh).map(({ t, ...g }) => g),
+    cpu: fresh(c) && { power: c.pkgW, dram: c.dramW, util: c.util, measured: c.measured, mhz: c.mhz, zoneC: c.zoneC,
+      temp: fresh(live.lhm) ? live.lhm.cpuTemp : null },
+    ram: { used: os.totalmem() - os.freemem(), total: os.totalmem() },
+    disk: fresh(c) ? { read: c.diskR, write: c.diskW } : null,
+    sensors: fresh(live.lhm) ? live.lhm.groups : null,
+    lhm: LHM_URL ? (fresh(live.lhm) ? "ok" : "unreachable") : "off",
+    control: CONTROL,
+    llm: CFG.llamaUrl ? live.llm : null,
+  };
+}
+
+// Energy efficiency per GPU power limit: the "same speed for 100 W less" check.
+// Minutes in which something was generated, grouped by the limit in force (5 W steps).
+function efficiency() {
+  return db.prepare(`SELECT CAST(ROUND(gpu_pl / 5.0) * 5 AS INTEGER) pl, SUM(gen_tok) gen, SUM(active_s) act,
+      SUM(wh_active) wh, SUM(gpu_w * active_s) / SUM(active_s) gpuw, COUNT(*) minutes
+    FROM m WHERE gen_tok > 0 AND active_s > 0 AND gpu_pl IS NOT NULL GROUP BY pl ORDER BY pl DESC`).all();
+}
+
+// ---------- setup: model parameters, pi, scheduled tasks ----------
+
+const piDir = process.env.DASH_PI_DIR || path.join(os.homedir(), ".pi", "agent");
+const taskPatterns = process.env.DASH_TASKS || "";
+const cache = new Map();
+
+async function cached(key, ms, fn) {
+  const c = cache.get(key);
+  if (c && Date.now() - c.t < ms) return c.v;
+  const v = await fn().catch((e) => ({ error: e.message }));
+  cache.set(key, { t: Date.now(), v });
+  return v;
+}
+
+const run$ = (cmd, args, opts = {}) => new Promise((resolve, reject) =>
+  execFile(cmd, args, { windowsHide: true, timeout: 20_000, ...opts }, (e, out) => e ? reject(e) : resolve(out)));
+
+// Router: every model with status and the exact command-line arguments it runs with.
+// Single server: /props (model file, context, build).
+async function llamaSetup() {
+  if (!CFG.llamaUrl) return null;
+  const j = await getJSON(`${CFG.llamaUrl}/models`);
+  const data = j.data || [];
+  if (data.some((m) => m.status)) {
+    return { mode: "router", models: data.map((m) => ({
+      id: m.id, status: m.status?.value, args: argPairs(m.status?.args || []),
+      kind: (m.architecture?.output_modalities || ["text"]).join(","),
+      ctxTrain: m.meta?.n_ctx_train, params: m.meta?.n_params, size: m.meta?.size,
+    })) };
+  }
+  const p = await getJSON(`${CFG.llamaUrl}/props`).catch(() => ({}));
+  return { mode: "server", models: [{ id: data[0]?.id, status: "loaded",
+    args: [["model", path.basename(p.model_path || "")], ["ctx-size", p.default_generation_settings?.n_ctx],
+      ["build", p.build_info]].filter((x) => x[1]),
+    ctxTrain: data[0]?.meta?.n_ctx_train, params: data[0]?.meta?.n_params, size: data[0]?.meta?.size }] };
+}
+
+// ["--port","61447","--jinja"] -> [["jinja",""],...]. Plumbing flags are left out,
+// secrets (--api-key, tokens, TLS keys) are masked and paths shortened to the file name,
+// so the page never shows a credential or your folder layout.
+const SECRET_ARG = /key|token|secret|password|passwd|auth|cred/i;
+function argPairs(a) {
+  const skip = new Set(["host", "port", "alias", "log-colors"]);
+  const out = [];
+  for (let i = 0; i < a.length; i++) {
+    if (!a[i].startsWith("--")) continue;
+    const k = a[i].slice(2);
+    const v = a[i + 1] && !a[i + 1].startsWith("--") ? a[++i] : "";
+    if (skip.has(k)) continue;
+    out.push([k, SECRET_ARG.test(k) ? (v ? "••••" : "") : /[\\/]/.test(v) ? path.basename(v) : v]);
+  }
+  return out;
+}
+
+const readJSON = (f) => { try { return JSON.parse(fs.readFileSync(f, "utf8")); } catch { return null; } };
+const listDir = (d, dirs) => { try { return fs.readdirSync(d, { withFileTypes: true })
+  .filter((e) => (dirs ? e.isDirectory() || e.isSymbolicLink() : e.isFile() && /\.(ts|js|mjs)$/.test(e.name)))
+  .map((e) => e.name); } catch { return []; } };
+const expand = (p) => path.resolve(p.replace(/^~(?=$|[\\/])/, os.homedir()));
+
+// pi (https://github.com/badlogic/pi-mono) settings, allow-listed: never auth.json,
+// never API keys or provider URLs.
+async function piSetup() {
+  const s = readJSON(path.join(piDir, "settings.json"));
+  if (!s) return null;
+  const models = readJSON(path.join(piDir, "models.json"));
+  const extDirs = [path.join(piDir, "extensions"), ...(s.extensions || []).map(expand)];
+  const skillDirs = [path.join(piDir, "skills"), ...(s.skills || []).map(expand)];
+  const version = await cached("pi-version", 3600_000, async () =>
+    (await run$(process.env.ComSpec || "cmd.exe", ["/d", "/c", "pi", "--version"])).trim());
+  return {
+    version: typeof version === "string" ? version : null,
+    provider: s.defaultProvider, model: s.defaultModel, thinking: s.defaultThinkingLevel,
+    tools: s.defaultTools || [], enabledModels: s.enabledModels || [],
+    compaction: s.compaction && { enabled: s.compaction.enabled, reserveTokens: s.compaction.reserveTokens,
+      keepRecentTokens: s.compaction.keepRecentTokens },
+    retry: s.retry?.enabled,
+    packages: (s.packages || []).map((p) => String(typeof p === "string" ? p : p.source || p.name || "").replace(/^npm:/, "")),
+    extensions: [...new Set(extDirs.flatMap((d) => listDir(d, false)))],
+    skills: [...new Set(skillDirs.flatMap((d) => listDir(d, true)))],
+    providers: Object.entries(models?.providers || {}).map(([name, p]) => ({ name, models: (p.models || []).map((m) => m.id) })),
+  };
+}
+
+async function tasksSetup() {
+  if (!taskPatterns) return null;
+  const out = await run$("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+    path.join(DIR, "tasks.ps1"), "-Patterns", taskPatterns]);
+  return JSON.parse(out || "[]");
+}
+
+async function setup() {
+  return {
+    llama: await cached("llama", 30_000, llamaSetup),
+    pi: await cached("pi", 60_000, piSetup),
+    tasks: await cached("tasks", 60_000, tasksSetup),
+  };
+}
+
+function runs(limit = 40) {
+  const rows = db.prepare("SELECT * FROM runs ORDER BY start DESC LIMIT ?").all(limit);
+  for (const [model, r] of openRuns) rows.unshift({ start: r.start, end: r.last, model, active_s: r.active,
+    wh: r.wh, gen_tok: r.gen, pp_tok: r.pp, req: r.req, open: true });
+  return rows;
+}
+
+// ---------- http ----------
+
+// Security model: read-only, GET only, a fixed list of files (no path ever comes from
+// the URL), strict Content-Security-Policy, and a Host check against DNS rebinding:
+// a web page you visit cannot point its own domain at 127.0.0.1 and read this API.
+// With DASH_TOKEN set (install.ps1 -AllowLan does it), every request also needs the token.
+
+const PUBLIC = path.join(DIR, "public");
+const STATIC = {
+  "/": ["index.html", "text/html; charset=utf-8"],
+  "/index.html": ["index.html", "text/html; charset=utf-8"],
+  "/app.js": ["app.js", "text/javascript; charset=utf-8"],
+  "/style.css": ["style.css", "text/css; charset=utf-8"],
+  "/logo.svg": ["logo.svg", "image/svg+xml"],
+};
+const SECURITY_HEADERS = {
+  "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; "
+    + "img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+  "x-content-type-options": "nosniff",
+  "x-frame-options": "DENY",
+  "referrer-policy": "no-referrer",
+  "cross-origin-opener-policy": "same-origin",
+  "cross-origin-resource-policy": "same-origin",
+  "cache-control": "no-store",
+};
+
+const TOKEN = process.env.DASH_TOKEN || "";
+const CONTROL = process.env.DASH_ALLOW_POWER_LIMIT === "1";
+
+// The only thing WattLlama can change, off unless DASH_ALLOW_POWER_LIMIT=1: the NVIDIA
+// power limit (what undervolting videos use to get the same speed for less power).
+// Accepted only from this PC, only from WattLlama's own page, only within the card's
+// own min..max, and Windows still asks you in a UAC prompt. Resets at reboot.
+let controlBusy = false;
+const isLoopback = (a) => a === "127.0.0.1" || a === "::1" || a === "::ffff:127.0.0.1";
+
+async function readBody(req, limit = 1024) {
+  let body = "";
+  for await (const chunk of req) { body += chunk; if (body.length > limit) throw new Error("too large"); }
+  return body;
+}
+
+async function setPowerLimit(req) {
+  if (!CONTROL) return [403, { error: "Power limit control is off (DASH_ALLOW_POWER_LIMIT=1 in .env)." }];
+  if (!isLoopback(req.socket.remoteAddress)) return [403, { error: "Only from this PC." }];
+  if (req.headers.origin !== `http://${req.headers.host}` || req.headers["x-wattllama"] !== "1"
+    || !String(req.headers["content-type"]).startsWith("application/json")) return [403, { error: "Not from the WattLlama page." }];
+  if (controlBusy) return [409, { error: "A change is already waiting for confirmation." }];
+  const body = JSON.parse(await readBody(req));
+  const g = live.gpus.get(String(body.gpu));
+  if (!g || g.limitMin == null || g.limitMax == null || g.limitDefault == null) return [400, { error: "Unknown GPU or no power limit support." }];
+  const watts = body.reset ? Math.round(g.limitDefault) : Number(body.watts);
+  if (!Number.isInteger(watts) || watts < g.safeMin || watts > Math.floor(g.limitMax)) {
+    return [400, { error: `Limit must be ${g.safeMin}-${Math.floor(g.limitMax)} W.` }];
+  }
+  const index = Number(g.index);
+  if (!Number.isInteger(index) || index < 0) return [400, { error: "Bad GPU index." }];
+  controlBusy = true;
+  try {
+    // Numbers only, validated above; nvidia-smi -pl needs admin, hence the UAC prompt.
+    const ps = `$p = Start-Process -FilePath nvidia-smi -ArgumentList '-i','${index}','-pl','${watts}' -Verb RunAs -WindowStyle Hidden -Wait -PassThru; exit $p.ExitCode`;
+    let code = 0;
+    try { await run$("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], { timeout: 120_000 }); }
+    catch (e) { code = e.code ?? 1; }
+    log(`power limit GPU ${index} -> ${watts} W: ${code === 0 ? "done" : "cancelled or failed"}`);
+    return code === 0 ? [200, { ok: true, gpu: index, watts }] : [409, { error: "Cancelled in the UAC prompt, or nvidia-smi refused." }];
+  } finally { controlBusy = false; }
+}
+const extraHosts = (process.env.DASH_ALLOWED_HOSTS || "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+
+// IP literals (how a phone reaches the PC), localhost, this PC's name; never a foreign domain.
+function hostAllowed(hostHeader) {
+  if (!hostHeader) return false;
+  const host = hostHeader.toLowerCase().replace(/:\d+$/, "").replace(/^\[|\]$/g, "");
+  if (host === "localhost" || host === os.hostname().toLowerCase() || extraHosts.includes(host)) return true;
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || /^[0-9a-f:]+$/.test(host) && host.includes(":");
+}
+
+function tokenOk(req, u) {
+  if (!TOKEN) return true;
+  const given = [
+    u.searchParams.get("token"),
+    (req.headers.authorization || "").replace(/^Bearer\s+/i, ""),
+    (req.headers.cookie || "").match(/(?:^|;\s*)wl_token=([^;]+)/)?.[1],
+  ].filter(Boolean);
+  const want = Buffer.from(TOKEN);
+  return given.some((g) => { const b = Buffer.from(decodeURIComponent(g)); return b.length === want.length && crypto.timingSafeEqual(b, want); });
+}
+
+http.createServer(async (req, res) => {
+  const send = (code, type, body, extra = {}) => {
+    res.writeHead(code, { ...SECURITY_HEADERS, "content-type": type, ...extra });
+    res.end(req.method === "HEAD" ? undefined : body);
+  };
+  const json = (o) => send(200, "application/json; charset=utf-8", JSON.stringify(o));
+  try {
+    const u = new URL(req.url, "http://localhost");
+    const isControl = req.method === "POST" && u.pathname === "/api/gpu/power-limit";
+    if (req.method !== "GET" && req.method !== "HEAD" && !isControl) return send(405, "text/plain", "read-only", { allow: "GET, HEAD" });
+    if (!hostAllowed(req.headers.host)) return send(403, "text/plain", "Host not allowed");
+    if (!tokenOk(req, u)) return send(401, "text/plain", "Open the link with ?token=… from install.ps1, once.");
+    if (isControl) {
+      const [code, out] = await setPowerLimit(req).catch((e) => [400, { error: e.message }]);
+      return send(code, "application/json; charset=utf-8", JSON.stringify(out));
+    }
+    if (TOKEN && u.searchParams.has("token")) {   // remember it in a cookie, drop it from the address bar
+      return send(302, "text/plain", "", { location: "/",
+        "set-cookie": `wl_token=${encodeURIComponent(TOKEN)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=31536000` });
+    }
+    const file = STATIC[u.pathname];
+    if (file) return send(200, file[1], fs.readFileSync(path.join(PUBLIC, file[0])));
+    if (u.pathname === "/api/live") return json(liveView());
+    if (u.pathname === "/api/series") return json(series(u.searchParams.get("range")));
+    if (u.pathname === "/api/summary") return json(summary());
+    if (u.pathname === "/api/runs") return json(runs());
+    if (u.pathname === "/api/heatmap") return json(heatmap(u.searchParams.get("days"), u.searchParams.get("model")));
+    if (u.pathname === "/api/setup") return json(await setup());
+    if (u.pathname === "/api/efficiency") return json(efficiency());
+    send(404, "text/plain", "not found");
+  } catch (e) {
+    log("http", e.message);
+    if (res.headersSent) res.end(); else send(500, "text/plain", "internal error");
+  }
+}).on("error", (e) => {
+  log(e.code === "EADDRINUSE" ? `port ${CFG.port} is in use: set DASH_PORT in .env` : `server: ${e.message}`);
+  process.exit(1);
+}).listen(CFG.port, CFG.host, () => {
+  log(`WattLlama on http://${CFG.host}:${CFG.port}${TOKEN ? " (token required)" : ""}`);
+  if (CFG.host !== "127.0.0.1" && CFG.host !== "localhost" && !TOKEN) log("warning: reachable from the network without DASH_TOKEN");
+});
+
+// Never take the PC down with us: an unexpected error is logged, the minute is saved,
+// and start.ps1 starts a fresh process 10 s later.
+process.on("unhandledRejection", (e) => log("unhandled", e?.message || e));
+process.on("uncaughtException", (e) => { log("fatal", e?.stack || e); try { flush(); closeAllRuns(); } catch {} process.exit(1); });
+
+for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => { flush(); closeAllRuns(); process.exit(0); });

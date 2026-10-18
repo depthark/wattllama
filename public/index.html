@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WattLlama</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="logo.svg" type="image/svg+xml">
+</head>
+<body>
+<main>
+  <header>
+    <h1><img src="logo.svg" alt="" width="26" height="26" style="vertical-align:-6px;margin-right:6px">WattLlama</h1>
+    <div class="hd"><div class="status" id="status">loading…</div><button class="theme" id="theme" title="Theme">auto</button></div>
+  </header>
+
+  <section class="grid">
+    <div class="card"><h3>Now</h3>
+      <div class="big" id="nowW">–</div>
+      <div class="row"><span>GPU</span><span id="nowGpu">–</span></div>
+      <div class="row"><span>CPU + RAM</span><span id="nowCpu">–</span></div>
+      <div class="row"><span>VRAM</span><span id="nowVram">–</span></div>
+    </div>
+    <div class="card"><h3>Today</h3>
+      <div class="big" id="todayKwh">–</div>
+      <div class="row"><span>PC on</span><span id="todayOn">–</span></div>
+      <div class="row l"><span>while the LLM generated</span><span id="todayL">–</span></div>
+      <div class="row"><span>extra over idle</span><span id="todayExtra">–</span></div>
+    </div>
+    <div class="card"><h3>History</h3>
+      <div class="row"><span>yesterday</span><span id="yKwh">–</span></div>
+      <div class="row"><span>last 7 days</span><span id="wKwh">–</span></div>
+      <div class="row"><span>this month</span><span id="mKwh">–</span></div>
+      <div class="row l"><span>LLM this month</span><span id="mL">–</span></div>
+    </div>
+    <div class="card"><h3>Tokens</h3>
+      <div class="big" id="tokToday">–</div>
+      <div class="row"><span>LLM busy today</span><span id="actToday">–</span></div>
+      <div class="row"><span>energy per 1k tokens</span><span id="whk">–</span></div>
+      <div class="row"><span>energy per 1M tokens</span><span id="per1m">–</span></div>
+    </div>
+  </section>
+
+  <div class="card" style="margin-bottom:14px">
+    <div class="heat-head">
+      <div><h4 id="heatTitle">Token usage by day and hour</h4><div class="muted" style="font-size:12px">00–23 h · stronger colour means more · repeated DST hours combine</div></div>
+      <div class="hd">
+        <div class="tabs" id="heatMetric"><button data-m="gen" class="on">Tokens</button><button data-m="wh">Energy</button><button data-m="act">LLM busy</button></div>
+        <select id="heatModel" class="sel" aria-label="Model"><option value="">All models</option></select>
+        <div class="tabs" id="heatDays"><button data-d="7" class="on">7 d</button><button data-d="14">14 d</button><button data-d="30">30 d</button></div>
+      </div>
+    </div>
+    <div class="trend"><span>Hourly trend</span><span id="heatTotal"></span></div>
+    <div class="hscroll"><div class="hgrid" id="heat"></div></div>
+  </div>
+
+  <div class="tabs" id="tabs">
+    <button data-r="1h">1 h</button><button data-r="6h">6 h</button><button data-r="24h" class="on">24 h</button>
+    <button data-r="7d">7 days</button><button data-r="30d">30 days</button>
+  </div>
+
+  <div class="chart"><h4>PC power (W)
+    <i style="--c:var(--gpu)">GPU</i><i style="--c:var(--cpu)">CPU + RAM</i><i style="--c:var(--rest)">rest + PSU loss</i><i style="--c:#ffd23f55">LLM generating</i></h4>
+    <canvas id="cPower"></canvas><div class="tip"></div></div>
+  <div class="chart"><h4>Energy over time (kWh, cumulative)
+    <i style="--c:var(--gpu)">whole PC</i><i style="--c:var(--llm)">while the LLM generated</i></h4>
+    <canvas id="cEnergy"></canvas><div class="tip"></div></div>
+  <div class="chart"><h4>Temperatures (°C)
+    <i style="--c:var(--hot)">GPU max</i><i style="--c:var(--gpu)">GPU average</i><i style="--c:var(--cpu)">CPU max (with LibreHardwareMonitor)</i></h4>
+    <canvas id="cTemp"></canvas><div class="tip"></div></div>
+  <div class="chart"><h4>Generated tokens
+    <i style="--c:var(--llm)">tokens per interval</i></h4>
+    <canvas id="cTok"></canvas><div class="tip"></div></div>
+
+  <h2 class="sec">Hardware</h2>
+  <div class="grid" id="hw"></div>
+
+  <h2 class="sec">Efficiency by GPU power limit</h2>
+  <div class="card scroll"><table id="eff"></table></div>
+
+  <h2 class="sec">LLM runs</h2>
+  <div class="card scroll"><table id="runs"></table><button class="theme" id="runsMore" hidden style="margin-top:8px"></button></div>
+
+  <h2 class="sec">Models (llama.cpp)</h2>
+  <div class="grid" id="models"><div class="card muted">llama.cpp not configured or not reachable</div></div>
+
+  <div id="piWrap" hidden>
+    <h2 class="sec">pi agent</h2>
+    <div class="grid" id="pi"></div>
+  </div>
+
+  <div id="tasksWrap" hidden>
+    <h2 class="sec">Scheduled tasks</h2>
+    <div class="card scroll"><table id="tasks"></table></div>
+  </div>
+
+  <footer id="foot"></footer>
+</main>
+<script src="app.js"></script>
+</body>
+</html>
