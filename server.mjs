@@ -1,12 +1,12 @@
 // WattLlama: what your Windows PC draws, how much energy it used over time,
-// and how much of that went into local LLM generation (llama.cpp).
+// and how much of that went into local LLM generation.
 //
 // Every 2 s, with no drivers and no admin rights:
 //   GPU      nvidia-smi (streaming), measured watts / temperature / VRAM, every NVIDIA card
 //   CPU+RAM  Windows "Energy Meter" (RAPL) counters via sampler.ps1, measured watts;
 //            without them, an estimate from CPU utilisation (DASH_CPU_MAX_W)
 //   rest     motherboard, disks, fans: DASH_REST_W, then the PSU loss (DASH_PSU_EFF)
-//   LLM      llama.cpp server or router: is it generating, how many tokens
+//   LLM      llama.cpp and other engines (engines/): is it generating, how many tokens
 // One row per minute goes to SQLite (data/power.db); one page shows it.
 
 import http from "node:http";
@@ -16,6 +16,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { ENGINES } from "./engines/index.mjs";
 
 const [major, minor] = process.versions.node.split(".").map(Number);
 if (major < 22 || (major === 22 && minor < 13)) {
@@ -30,8 +31,6 @@ loadEnv(path.join(DIR, ".env"));
 const CFG = {
   host: process.env.DASH_HOST || "127.0.0.1",
   port: Number(process.env.DASH_PORT || 8091),
-  llamaUrl: (process.env.DASH_LLAMA_URL ?? "http://127.0.0.1:8080").replace(/\/$/, ""),
-  llamaLog: process.env.DASH_LLAMA_LOG || "",
   restW: Number(process.env.DASH_REST_W || 35),
   psuEff: Number(process.env.DASH_PSU_EFF || 0.88),
   cpuMaxW: Number(process.env.DASH_CPU_MAX_W || 65),
@@ -89,7 +88,7 @@ const live = {
   gpus: new Map(),       // index -> nvidia-smi reading, see below
   cpu: null,             // { t, pkgW, dramW, util, mhz, zoneC, diskR, diskW, measured }
   lhm: null,             // { t, groups: [{ hardware, sensors: [{ name, kind, value, unit }] }], cpuTemp }
-  llm: { t: 0, reachable: false, processing: false, models: [], tokenSource: "none" },
+  llm: { t: 0, reachable: false, processing: false, models: [], engines: [] },
   sysW: null,
 };
 
@@ -184,145 +183,43 @@ function gpuTotals(now) {
   return n ? { n, power, temp, vramUsed, vramTotal, util, limit, fan } : null;
 }
 
-// ---------- llama.cpp ----------
+// ---------- inference engines ----------
 //
-// Works with a single llama-server and with router mode (--models-dir / presets).
-// "Generating" comes from /slots. Token counts, best source first:
-//   1. DASH_LLAMA_LOG: the server's log file; exact (print_timing lines)
-//   2. /metrics (server started with --metrics); exact
-//   3. /slots; approximate, the last moments of each reply are missed
-// In router mode only models that are already loaded are asked, because
-// /slots?model=X on an unloaded model would make the router load it.
-//
-
-// Everything is tracked per model: a router can run several at once (a chat model
-// on the GPU next to a small classifier on the CPU), and each gets its own status,
-// tokens, busy time and runs.
+// Each adapter in engines/ (llama.cpp, ...) reports its loaded models, whether each one is
+// generating right now, and the tokens it handled. Everything is tracked per model: a
+// router can run several at once (a chat model on the GPU next to a small classifier on
+// the CPU), and each gets its own status, tokens, busy time and runs.
 
 const pending = new Map();          // model -> { gen, pp, req } not yet written
 const addTokens = (model, gen, pp, req = 0) => {
   const p = pending.get(model) || { gen: 0, pp: 0, req: 0 };
   p.gen += gen; p.pp += pp; p.req += req; pending.set(model, p);
 };
-const kindOf = new Map();           // model -> output modalities ("text", "decisions", ...)
-const slotState = new Map();
-const metricState = new Map();
-const portModel = new Map();        // router child port -> model id (log lines start with [port])
-let logPos = null, logRest = "", singleModel = null;
 
-// A server started with --api-key needs it on every request (DASH_LLAMA_API_KEY).
-const llamaHeaders = process.env.DASH_LLAMA_API_KEY ? { authorization: `Bearer ${process.env.DASH_LLAMA_API_KEY}` } : {};
+const wanted = (process.env.DASH_ENGINES || "auto").toLowerCase().split(",").map((s) => s.trim());
+const engines = ENGINES
+  .filter((E) => wanted.includes("auto") || wanted.includes(E.name.toLowerCase()))
+  .map((E) => { try { return E.create({ env: process.env, addTokens, log, stream }); } catch (e) { log(`${E.name}: ${e.message}`); return null; } })
+  .filter(Boolean)
+  .map((e) => Object.assign(e, { state: { reachable: false, retryAt: 0, models: [], tokenSource: "none" } }));
 
-async function getJSON(url) {
-  const r = await fetch(url, { headers: llamaHeaders, signal: AbortSignal.timeout(3000) });
-  if (!r.ok) throw Object.assign(new Error(`${r.status}`), { status: r.status });
-  return r.json();
-}
-
-async function targets() {
-  // Router: /models lists every model with status.value; single server: no status.
-  const j = await getJSON(`${CFG.llamaUrl}/models`);
-  const data = j.data || [];
-  if (!data.some((m) => m.status)) {
-    singleModel = data[0]?.id || "model";
-    return [{ id: singleModel, q: "", kind: (data[0]?.architecture?.output_modalities || ["text"]).join(",") }];
-  }
-  singleModel = null;
-  const loaded = data.filter((m) => m.status?.value === "loaded");
-  for (const m of loaded) {
-    kindOf.set(m.id, (m.architecture?.output_modalities || ["text"]).join(","));
-    const a = m.status.args || [];
-    const i = a.indexOf("--port");
-    if (i >= 0) portModel.set(String(a[i + 1]), m.id);
-  }
-  return loaded.map((m) => ({ id: m.id, q: `?model=${encodeURIComponent(m.id)}`,
-    kind: (m.architecture?.output_modalities || ["text"]).join(",") }));
-}
-
-function readLog() {
-  let size;
-  try { size = fs.statSync(CFG.llamaLog).size; } catch { return false; }
-  if (logPos == null || size < logPos) { logPos = logPos == null ? size : 0; logRest = ""; }
-  if (size > logPos) {
-    const fd = fs.openSync(CFG.llamaLog, "r");
-    try {
-      const buf = Buffer.alloc(Math.min(size - logPos, 4 << 20));
-      fs.readSync(fd, buf, 0, buf.length, logPos);
-      logPos += buf.length;
-      const lines = (logRest + buf.toString("utf8")).split("\n");
-      logRest = lines.pop();
-      for (const l of lines) {
-        if (!l.includes(" slot ")) continue;
-        const port = l.match(/^\[(\d+)\]/)?.[1];
-        const model = port ? portModel.get(port) : singleModel;
-        if (!model) continue;
-        if (/launch_slot_.*processing task/.test(l)) { addTokens(model, 0, 0, 1); continue; }
-        const m = l.match(/print_timing:.*\|\s+(prompt )?eval time =\s*[\d.]+ ms \/\s*(\d+) tokens/);
-        if (m) { if (m[1]) addTokens(model, 0, Number(m[2])); else addTokens(model, Number(m[2]), 0); continue; }
-        // Models that write no text (classifiers, embeddings) print no timings:
-        // count the tokens they read from the release line instead.
-        const r = l.match(/release:.*n_tokens = (\d+)/);
-        if (r && (kindOf.get(model) || "text") !== "text") addTokens(model, 0, Number(r[1]));
-      }
-    } finally { fs.closeSync(fd); }
-  }
-  return true;
-}
-
-async function readMetrics(t) {
-  let text;
+// An engine that is not running is asked again every 10 s only, so it costs nothing.
+async function pollEngine(e, now) {
+  if (!e.state.reachable && now < e.state.retryAt) return;
   try {
-    const r = await fetch(`${CFG.llamaUrl}/metrics${t.q}`, { headers: llamaHeaders, signal: AbortSignal.timeout(3000) });
-    if (!r.ok) return false;
-    text = await r.text();
-  } catch { return false; }
-  const val = (name) => Number(text.match(new RegExp(`^llamacpp:${name}\\s+([\\d.e+]+)`, "m"))?.[1] ?? NaN);
-  const gen = val("tokens_predicted_total"), pp = val("prompt_tokens_total");
-  if (!Number.isFinite(gen)) return false;
-  const prev = metricState.get(t.id);
-  if (prev) {   // a counter that went down means the model was reloaded
-    addTokens(t.id, gen >= prev.gen ? gen - prev.gen : gen, pp >= prev.pp ? pp - prev.pp : pp);
+    const r = await e.poll();
+    e.state = { reachable: true, retryAt: 0, models: r.models, tokenSource: r.tokenSource, note: r.note };
+  } catch {
+    e.state = { reachable: false, retryAt: now + 10_000, models: [], tokenSource: "none" };
   }
-  metricState.set(t.id, { gen, pp });
-  return true;
 }
 
 async function pollLLM() {
-  if (!CFG.llamaUrl) return;
-  try {
-    const list = await targets();
-    const useLog = CFG.llamaLog && readLog();
-    const now = Date.now();
-    const prev = new Map((live.llm.models || []).map((m) => [m.id, m]));
-    const models = [];
-    let anyMetrics = false;
-    for (const t of list) {
-      const metricsOk = !useLog && (await readMetrics(t));
-      anyMetrics ||= metricsOk;
-      let processing = false, slotGen = 0, slotReq = 0;
-      try {
-        for (const s of await getJSON(`${CFG.llamaUrl}/slots${t.q}`)) {
-          const nt = Array.isArray(s.next_token) ? s.next_token[0] : s.next_token;
-          const dec = nt?.n_decoded ?? 0;
-          const key = `${t.id}:${s.id}`;
-          const st = slotState.get(key);
-          if (s.is_processing && st && st.task === s.id_task) slotGen += Math.max(0, dec - st.dec);
-          else if (s.is_processing && st) { slotGen += dec; slotReq++; }
-          slotState.set(key, { task: s.id_task, dec });
-          if (s.is_processing) processing = true;
-        }
-      } catch {}   // server started with --no-slots: no activity for this model
-      if (!useLog) addTokens(t.id, metricsOk ? 0 : slotGen, 0, slotReq);
-      const p = prev.get(t.id), dt = (now - (live.llm.t || now)) / 1000;
-      const rate = dt > 0 ? slotGen / dt : 0;
-      models.push({ id: t.id, kind: t.kind, processing,
-        genRate: processing ? (p?.processing ? 0.5 * p.genRate + 0.5 * rate : rate) : 0 });
-    }
-    const tokenSource = useLog ? "log" : anyMetrics ? "metrics" : list.length ? "slots" : "none";
-    live.llm = { t: now, reachable: true, processing: models.some((m) => m.processing), models, tokenSource };
-  } catch {
-    live.llm = { t: Date.now(), reachable: false, processing: false, models: [], tokenSource: "none" };
-  }
+  const now = Date.now();
+  await Promise.all(engines.map((e) => pollEngine(e, now)));
+  const models = engines.flatMap((e) => e.state.models.map((m) => ({ ...m, engine: e.name })));
+  live.llm = { t: now, reachable: engines.some((e) => e.state.reachable), processing: models.some((m) => m.processing),
+    models, engines: engines.map((e) => ({ name: e.name, reachable: e.state.reachable, tokenSource: e.state.tokenSource, note: e.state.note })) };
 }
 
 // ---------- minute rows ----------
@@ -572,7 +469,7 @@ function liveView() {
     sensors: fresh(live.lhm) ? live.lhm.groups : null,
     lhm: LHM_URL ? (fresh(live.lhm) ? "ok" : "unreachable") : "off",
     control: CONTROL,
-    llm: CFG.llamaUrl ? live.llm : null,
+    llm: engines.length ? live.llm : null,
   };
 }
 
@@ -600,43 +497,6 @@ async function cached(key, ms, fn) {
 
 const run$ = (cmd, args, opts = {}) => new Promise((resolve, reject) =>
   execFile(cmd, args, { windowsHide: true, timeout: 20_000, ...opts }, (e, out) => e ? reject(e) : resolve(out)));
-
-// Router: every model with status and the exact command-line arguments it runs with.
-// Single server: /props (model file, context, build).
-async function llamaSetup() {
-  if (!CFG.llamaUrl) return null;
-  const j = await getJSON(`${CFG.llamaUrl}/models`);
-  const data = j.data || [];
-  if (data.some((m) => m.status)) {
-    return { mode: "router", models: data.map((m) => ({
-      id: m.id, status: m.status?.value, args: argPairs(m.status?.args || []),
-      kind: (m.architecture?.output_modalities || ["text"]).join(","),
-      ctxTrain: m.meta?.n_ctx_train, params: m.meta?.n_params, size: m.meta?.size,
-    })) };
-  }
-  const p = await getJSON(`${CFG.llamaUrl}/props`).catch(() => ({}));
-  return { mode: "server", models: [{ id: data[0]?.id, status: "loaded",
-    args: [["model", path.basename(p.model_path || "")], ["ctx-size", p.default_generation_settings?.n_ctx],
-      ["build", p.build_info]].filter((x) => x[1]),
-    ctxTrain: data[0]?.meta?.n_ctx_train, params: data[0]?.meta?.n_params, size: data[0]?.meta?.size }] };
-}
-
-// ["--port","61447","--jinja"] -> [["jinja",""],...]. Plumbing flags are left out,
-// secrets (--api-key, tokens, TLS keys) are masked and paths shortened to the file name,
-// so the page never shows a credential or your folder layout.
-const SECRET_ARG = /key|token|secret|password|passwd|auth|cred/i;
-function argPairs(a) {
-  const skip = new Set(["host", "port", "alias", "log-colors"]);
-  const out = [];
-  for (let i = 0; i < a.length; i++) {
-    if (!a[i].startsWith("--")) continue;
-    const k = a[i].slice(2);
-    const v = a[i + 1] && !a[i + 1].startsWith("--") ? a[++i] : "";
-    if (skip.has(k)) continue;
-    out.push([k, SECRET_ARG.test(k) ? (v ? "••••" : "") : /[\\/]/.test(v) ? path.basename(v) : v]);
-  }
-  return out;
-}
 
 const readJSON = (f) => { try { return JSON.parse(fs.readFileSync(f, "utf8")); } catch { return null; } };
 const listDir = (d, dirs) => { try { return fs.readdirSync(d, { withFileTypes: true })
@@ -677,7 +537,8 @@ async function tasksSetup() {
 
 async function setup() {
   return {
-    llama: await cached("llama", 30_000, llamaSetup),
+    engines: await Promise.all(engines.filter((e) => e.state.reachable && e.setup).map(async (e) =>
+      ({ engine: e.name, ...(await cached(`engine:${e.name}`, 30_000, e.setup)) }))),
     pi: await cached("pi", 60_000, piSetup),
     tasks: await cached("tasks", 60_000, tasksSetup),
   };

@@ -22,7 +22,7 @@ async function refreshLive() {
     const m = L.llm;
     liveModels = m?.models || [];
     $("status").innerHTML = !m ? "LLM tracking off"
-      : !m.reachable ? "llama.cpp not reachable"
+      : !m.reachable ? `no engine running (${esc(m.engines.map((e) => e.name).join(", "))})`
       : !liveModels.length ? "no model loaded"
       : liveModels.map((x) => x.processing
           ? `<b><span class="dot run"></span>${esc(short(x.id))} · ${Math.round(x.genRate)} tok/s</b>`
@@ -82,6 +82,7 @@ const short = (id) => String(id).replace(/\.gguf$/i, "");
 // One card per model: live state, today's / all-time numbers, and its exact parameters.
 function renderModels() {
   if (!setupModels) return;
+  if (!setupModels.length) { $("models").innerHTML = `<div class="card muted">No inference engine reachable. WattLlama reads llama.cpp; see the README to connect it.</div>`; return; }
   const stat = (when, id) => (S?.models?.[when] || []).find((x) => x.model === id);
   $("models").innerHTML = setupModels.map((m) => {
     const lv = liveModels.find((x) => x.id === m.id);
@@ -91,7 +92,7 @@ function renderModels() {
       <div class="row"><span>today</span><span>${nf(t?.req || 0)} req · ${t?.gen ? nf(t.gen) + " tok out · " : ""}${nf(t?.pp || 0)} tok in · ${dur(t?.act || 0)} busy</span></div>
       <div class="row"><span>energy while busy today</span><span>${energy(t?.wh || 0)}</span></div>
       <div class="row"><span>all time</span><span>${nf(a?.req || 0)} req · ${a?.gen ? `${nf(a.gen)} tok · ${energy(a.wh / (a.gen / 1000))} / 1k tok` : `${dur(a?.act || 0)} busy · ${a?.req ? energy(a.wh / a.req) + " / req" : "–"}`}</span></div>` : "";
-    return `<div class="card"><h3><span class="dot ${st[0]}"></span>${esc(st[1])}${m.kind && m.kind !== "text" ? ` · ${esc(m.kind)}` : ""}</h3>
+    return `<div class="card"><h3><span class="dot ${st[0]}"></span>${esc(st[1])}${m.kind && m.kind !== "text" ? ` · ${esc(m.kind)}` : ""}<span class="eng">${esc(m.engine)}</span></h3>
       <div style="font-weight:600;margin-bottom:4px;word-break:break-all">${esc(m.id)}</div>
       <div class="muted" style="font-size:12px;margin-bottom:8px">${[bn(m.params), gb(m.size), m.ctxTrain ? `trained ctx ${nf(m.ctxTrain)}` : ""].filter(Boolean).join(" · ")}</div>
       ${rows}<div style="margin-top:8px">${m.args.length ? chips(m.args.map(([k, v]) => v === "" ? esc(k) : `${esc(k)} <b>${esc(v)}</b>`), "k") : '<span class="muted">not loaded: parameters appear once it runs</span>'}</div>
@@ -101,8 +102,8 @@ function renderModels() {
 
 async function refreshSetup() {
   const X = await get("api/setup");
-  const L = X.llama;
-  if (L && L.models) { setupModels = L.models; renderModels(); }
+  setupModels = (X.engines || []).flatMap((E) => (E.models || []).map((m) => ({ ...m, engine: E.engine })));
+  renderModels();
   const P = X.pi;
   $("piWrap").hidden = !P || P.error;
   if (P && !P.error) {

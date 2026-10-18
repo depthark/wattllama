@@ -53,6 +53,7 @@
   .chip { border: 1px solid var(--line); border-radius: 999px; padding: 1px 9px; font-size: 12px; background: var(--chipbg); }
   .chip.k { border-color: #2ee6d644; }
   .chip b { color: var(--gpu); font-weight: 500; }
+  .eng { float: right; text-transform: none; letter-spacing: 0; font-weight: 500; border: 1px solid var(--line); border-radius: 999px; padding: 0 8px; }
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: var(--dim); }
   .dot.ok { background: var(--ok); } .dot.bad { background: var(--hot); } .dot.run { background: var(--llm); }
   .muted { color: var(--dim); }
