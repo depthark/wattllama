@@ -25,7 +25,7 @@ const LHM = { Text: "Sensor", Children: [{ Text: "PC", Children: [
 
 function request(port, { method = "GET", path: p = "/", headers = {} } = {}) {
   return new Promise((ok, fail) => {
-    const r = http.request({ host: "127.0.0.1", port, method, path: p, headers }, (res) => {
+    const r = http.request({ host: "127.0.0.1", port, method, path: p, headers, agent: false }, (res) => {
       let body = ""; res.on("data", (d) => body += d); res.on("end", () => ok({ status: res.statusCode, headers: res.headers, body }));
     });
     r.on("error", (e) => { e.message = `${method} ${p}: ${e.message}`; fail(e); }); r.end();

@@ -17,7 +17,7 @@ const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
 function request(port, p, headers = {}) {
   return new Promise((ok, fail) => {
-    const r = http.request({ host: "127.0.0.1", port, path: p, headers }, (res) => {
+    const r = http.request({ host: "127.0.0.1", port, path: p, headers, agent: false }, (res) => {
       let body = ""; res.on("data", (d) => body += d); res.on("end", () => ok({ status: res.statusCode, headers: res.headers, body }));
     });
     r.on("error", (e) => { e.message = `${p}: ${e.message}`; fail(e); }); r.end();
@@ -39,12 +39,17 @@ async function startServer(extraEnv = {}, args = ["--demo"]) {
 // ---------- SQL injection ----------
 
 const PAYLOADS = ["' OR '1'='1", "'; DROP TABLE m; --", "1; DELETE FROM runs", "\" OR 1=1 --", "1 UNION SELECT name, sql FROM sqlite_master --",
-  "%27%20OR%201%3D1", "../../../etc/passwd", "<script>alert(1)</script>", "\u0000", "9".repeat(400), "-1", "NaN", "1e309", "[object Object]"];
+  "%27%20OR%201%3D1", "../../../etc/passwd", "constructor", "__proto__", "toString", "hasOwnProperty", "<script>alert(1)</script>", "\u0000", "9".repeat(400), "-1", "NaN", "1e309", "[object Object]"];
 
 test("SQL injection: every parameter of every endpoint, nothing changes, nothing breaks", { timeout: 120_000 }, async () => {
   const s = await startServer();
   try {
-    const before = JSON.parse((await request(s.port, "/api/summary")).body).all;
+    // What live sampling does not touch (it adds seconds and Wh every 2 s): tokens, runs, requests.
+    const snapshot = async () => {
+      const a = JSON.parse((await request(s.port, "/api/summary")).body).all;
+      return { gen: a.gen, pp: a.pp, requests: JSON.parse((await request(s.port, "/api/requests?range=30d")).body).rows.length };
+    };
+    const before = await snapshot();
     const runsBefore = JSON.parse((await request(s.port, "/api/runs")).body).length;
     const endpoints = [["/api/series", "range"], ["/api/heatmap", "days"], ["/api/heatmap", "model"], ["/api/report", "period"],
       ["/api/report.csv", "period"], ["/api/export.csv", "data"], ["/api/export.csv", "range"], ["/api/requests", "model"], ["/api/requests", "range"]];
@@ -53,7 +58,7 @@ test("SQL injection: every parameter of every endpoint, nothing changes, nothing
       assert.ok(r.status === 200, `${ep}?${param}=${p} -> ${r.status}`);
       assert.ok(!/CREATE TABLE|SQLITE_ERROR|SqliteError/i.test(r.body), `${ep}?${param}=${p} leaked the schema or an SQL error`);   // the parameter itself may be echoed back as JSON
     }
-    assert.deepEqual(JSON.parse((await request(s.port, "/api/summary")).body).all, before, "no data changed");
+    assert.deepEqual(await snapshot(), before, "no data changed");
     assert.equal(JSON.parse((await request(s.port, "/api/runs")).body).length, runsBefore);
     assert.ok(!/internal error|SqliteError|syntax error/i.test(s.out()), "no query failed");
   } finally { await s.stop(); }
@@ -73,7 +78,8 @@ test("static guard: SQL text is never built from request data", () => {
   assert.deepEqual(bad, [], "dynamic SQL from an unexpected expression");
   // ...and the identifiers that are interpolated come from fixed lists only:
   const srv = fs.readFileSync(path.join(ROOT, "server.mjs"), "utf8");
-  assert.match(srv, /const \[table, tcol\] = EXPORTS\[what\] \|\| EXPORTS\.minutes;/);
+  assert.match(srv, /const key = EXPORTS\[what\] \? what : "minutes"/);
+  assert.match(srv, /const fixed = \(o\) => Object\.freeze\(Object\.assign\(Object\.create\(null\), o\)\);/, "lookup tables without a prototype");
   assert.match(srv, /if \(!RANGES\[range\]\) range = "24h";/);
 });
 

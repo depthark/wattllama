@@ -282,6 +282,10 @@ async function pollLLM() {
     models, engines: engines.map((e) => ({ name: e.name, reachable: e.state.reachable, tokenSource: e.state.tokenSource, note: e.state.note })) };
 }
 
+// Lookup tables keyed by request input have no prototype: "constructor", "__proto__" or
+// "toString" are not keys, so they cannot slip through a check like RANGES[range].
+const fixed = (o) => Object.freeze(Object.assign(Object.create(null), o));
+
 // ---------- minute rows ----------
 
 // --demo: a separate database pre-filled with 14 days of made-up history, so the page can
@@ -464,7 +468,7 @@ setInterval(() => { try { flush(); } catch (e) { log("flush", e.message); } }, 1
 
 // ---------- queries ----------
 
-const RANGES = { "1h": [3600, 60], "6h": [6 * 3600, 60], "24h": [86400, 300], "7d": [7 * 86400, 1800], "30d": [30 * 86400, 7200] };
+const RANGES = fixed({ "1h": [3600, 60], "6h": [6 * 3600, 60], "24h": [86400, 300], "7d": [7 * 86400, 1800], "30d": [30 * 86400, 7200] });
 
 function series(range) {
   if (!RANGES[range]) range = "24h";
@@ -689,30 +693,40 @@ function share() {
 
 // CSV export: one table, streamed row by row (memory stays flat even for months of data).
 // The table and range come from fixed lists, never from the URL as SQL.
-const EXPORTS = {
+const EXPORTS = fixed({
   minutes: ["m", "ts"], models: ["mm", "ts"], runs: ["runs", "start"],
-};
-const EXPORT_RANGES = { "24h": 86400, "7d": 7 * 86400, "30d": 30 * 86400, all: null };
-function exportCSV(res, sendHeaders, what, range) {
-  const [table, tcol] = EXPORTS[what] || EXPORTS.minutes;
-  const span = EXPORT_RANGES[range] === undefined ? EXPORT_RANGES["30d"] : EXPORT_RANGES[range];
+});
+const EXPORT_RANGES = fixed({ "24h": 86400, "7d": 7 * 86400, "30d": 30 * 86400, all: null });
+async function exportCSV(res, sendHeaders, what, range) {
+  const key = EXPORTS[what] ? what : "minutes", r = EXPORT_RANGES[range] !== undefined ? range : "30d";
+  const [table, tcol] = EXPORTS[key];
+  const span = EXPORT_RANGES[r];
   const from = span == null ? 0 : Date.now() - span * 1000;
   const cols = rdb.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
   const cell = (v) => v == null ? "" : typeof v === "number" ? (Number.isInteger(v) ? String(v) : String(+v.toFixed(4)))
     : /[",\r\n]/.test(v) || /^[=+\-@]/.test(v) ? `"${String(v).replace(/^([=+\-@])/, "'$1").replace(/"/g, '""')}"` : v;   // no spreadsheet formulas
-  sendHeaders({ "content-type": "text/csv; charset=utf-8",
-    "content-disposition": `attachment; filename="wattllama-${what in EXPORTS ? what : "minutes"}-${range in EXPORT_RANGES ? range : "30d"}.csv"` });
+  sendHeaders({ "content-type": "text/csv; charset=utf-8", "content-disposition": `attachment; filename="wattllama-${key}-${r}.csv"` });
   res.write(["time", ...cols].join(",") + "\n");
-  let chunk = "";
-  for (const r of rdb.prepare(`SELECT * FROM ${table} WHERE ${tcol} >= ? ORDER BY ${tcol}`).iterate(from)) {
-    chunk += [new Date(r[tcol]).toISOString(), ...cols.map((c) => cell(r[c]))].join(",") + "\n";
-    if (chunk.length > 64 << 10) { res.write(chunk); chunk = ""; }
+  // Pages of 2,000 rows (keyset on time + rowid), each a short query of its own: no statement
+  // or iterator stays open while we wait for the browser (an open iterator breaks on
+  // Node 22.13 when other queries run in between), and the sampling keeps running.
+  const page = rdb.prepare(`SELECT rowid AS _rid, * FROM ${table} WHERE ${tcol} >= ? AND (${tcol}, rowid) > (?, ?) ORDER BY ${tcol}, rowid LIMIT 2000`);
+  let lastT = -Infinity, lastId = -Infinity;
+  for (;;) {
+    const rows = page.all(from, lastT, lastId);
+    if (!rows.length) break;
+    let chunk = "";
+    for (const row of rows) chunk += [new Date(row[tcol]).toISOString(), ...cols.map((c) => cell(row[c]))].join(",") + "\n";
+    ({ [tcol]: lastT, _rid: lastId } = rows.at(-1));
+    if (res.destroyed) return;                    // the browser went away
+    if (!res.write(chunk)) await new Promise((done) => { res.once("drain", done); res.once("close", done); });
+    else await new Promise((done) => setImmediate(done));
   }
-  res.end(chunk);
+  res.end();
 }
 
 // Requests of one model (or all) in a fixed range, newest first, for the inference details.
-const REQ_RANGES = { "24h": 86400, "7d": 7 * 86400, "30d": 30 * 86400 };
+const REQ_RANGES = fixed({ "24h": 86400, "7d": 7 * 86400, "30d": 30 * 86400 });
 function requests(model, range) {
   if (!REQ_RANGES[range]) range = "24h";
   const from = Date.now() - REQ_RANGES[range] * 1000;
@@ -738,13 +752,13 @@ function runs(limit = 40) {
 // With DASH_TOKEN set (install.ps1 -AllowLan does it), every request also needs the token.
 
 const PUBLIC = path.join(DIR, "public");
-const STATIC = {
+const STATIC = fixed({
   "/": ["index.html", "text/html; charset=utf-8"],
   "/index.html": ["index.html", "text/html; charset=utf-8"],
   "/app.js": ["app.js", "text/javascript; charset=utf-8"],
   "/style.css": ["style.css", "text/css; charset=utf-8"],
   "/logo.svg": ["logo.svg", "image/svg+xml"],
-};
+});
 const SECURITY_HEADERS = {
   "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; "
     + "img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
@@ -887,7 +901,7 @@ const httpServer = http.createServer(async (req, res) => {
     }
     if (u.pathname === "/api/export.csv") {
       if (req.method === "HEAD") return send(200, "text/csv; charset=utf-8", "");
-      return exportCSV(res, (h) => res.writeHead(200, { ...SECURITY_HEADERS, ...h }), u.searchParams.get("data"), u.searchParams.get("range"));
+      return await exportCSV(res, (h) => res.writeHead(200, { ...SECURITY_HEADERS, ...h }), u.searchParams.get("data"), u.searchParams.get("range"));
     }
     send(404, "text/plain", "not found");
   } catch (e) {
