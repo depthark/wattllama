@@ -26,7 +26,8 @@ fi
 
 if [ -f /etc/sudoers.d/wattllama-power-limit ] || [ -f /usr/local/lib/wattllama/power-limit ]; then
   echo "Removing the power-limit helper and its sudoers rule (asks for sudo)..."
-  sudo rm -f /etc/sudoers.d/wattllama-power-limit /usr/local/lib/wattllama/power-limit
+  sudo rm -f /etc/sudoers.d/wattllama-power-limit /usr/local/lib/wattllama/power-limit /etc/wattllama/power-limit-above-default
+  sudo rmdir /etc/wattllama 2>/dev/null || true
   sudo rmdir /usr/local/lib/wattllama 2>/dev/null || true
 fi
 

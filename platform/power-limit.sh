@@ -4,8 +4,10 @@
 # Setting an NVIDIA power limit needs root. Instead of running anything else as root, a sudoers
 # rule lets your user run exactly this root-owned file without a password, and it does one
 # thing: set one GPU's power limit, checked here again (the page checked it already) to lie
-# between 60 % of the card's default and its maximum. A power cap only slows the card down;
-# it cannot make the system unstable, and it resets at reboot.
+# between 60 % of the card's default and the default. A power cap only slows the card down;
+# it cannot make the system unstable, and it resets at reboot. Above the card's default only if
+# root created /etc/wattllama/power-limit-above-default (install.sh --power-limit-above-default):
+# more than the default can trip a weak power supply and switch the PC off.
 #
 #   power-limit <gpu index> <watts>
 set -euo pipefail
@@ -13,7 +15,8 @@ set -euo pipefail
 NVSMI=/usr/bin/nvidia-smi                       # install.sh writes the real, root-owned path here
 # Tests may point to a fake nvidia-smi, but never when running as root (sudo resets the
 # environment anyway).
-if [ "$(id -u)" -ne 0 ] && [ -n "${WATTLLAMA_NVSMI:-}" ]; then NVSMI=$WATTLLAMA_NVSMI; fi
+ABOVE=/etc/wattllama/power-limit-above-default
+if [ "$(id -u)" -ne 0 ] && [ -n "${WATTLLAMA_NVSMI:-}" ]; then NVSMI=$WATTLLAMA_NVSMI; ABOVE=${WATTLLAMA_ABOVE_FLAG:-$ABOVE}; fi
 
 if [ $# -ne 2 ] || ! [[ $1 =~ ^[0-9]{1,2}$ ]] || ! [[ $2 =~ ^[0-9]{1,4}$ ]]; then
   echo "usage: power-limit <gpu index> <watts> (whole numbers)" >&2
@@ -27,6 +30,7 @@ for v in "$def" "$min" "$max"; do
 done
 ceil() { local i=${1%.*} f=${1#*.}; if [ "$1" != "$i" ] && [ "$((10#${f:-0}))" -gt 0 ]; then echo $((i + 1)); else echo "$i"; fi; }
 d=$(ceil "$def") lo=$(ceil "$min") hi=${max%.*}
+if [ ! -e "$ABOVE" ] && [ "${def%.*}" -lt "$hi" ]; then hi=${def%.*}; fi     # not above the default unless allowed
 steps=$(( (d * 60 + 499) / 500 ))               # 60 % of the default in 5 W steps, rounded up
 floor=$(( steps * 5 ))
 [ "$floor" -lt "$lo" ] && floor=$lo

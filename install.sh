@@ -6,16 +6,18 @@
 #   ./install.sh               install / update and start
 #   ./install.sh --rapl        also install the root helper that makes CPU + RAM power measurable
 #   ./install.sh --power-limit let the page set the NVIDIA power limit (a sudoers rule for one helper)
+#   ./install.sh --power-limit-above-default   also allow limits above the card's default (strong PSU only)
 #   ./install.sh --allow-lan   also serve the page to your phone on the home network (token required)
 #   ./install.sh --no-open     do not open the browser
 set -euo pipefail
 
 DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-RAPL=0 ALLOW_LAN=0 NO_OPEN=0 POWER=0
+RAPL=0 ALLOW_LAN=0 NO_OPEN=0 POWER=0 ABOVE=0
 for a in "$@"; do
   case "$a" in
     --rapl) RAPL=1 ;;
     --power-limit) POWER=1 ;;
+    --power-limit-above-default) POWER=1 ABOVE=1 ;;
     --allow-lan) ALLOW_LAN=1 ;;
     --no-open) NO_OPEN=1 ;;
     -h|--help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -93,6 +95,15 @@ if [ "$POWER" -eq 1 ]; then
     else say "Power limit: the sudoers rule did not validate; not installed."; fi
     rm -f "$DIR/.sudoers.tmp"
     set_setting DASH_ALLOW_POWER_LIMIT 1
+    if [ "$ABOVE" -eq 1 ]; then
+      sudo install -d -o root -g root -m 0755 /etc/wattllama
+      sudo touch /etc/wattllama/power-limit-above-default
+      set_setting DASH_POWER_LIMIT_ABOVE_DEFAULT 1
+      say "Power limit: limits above the card's default are allowed. Only with a power supply that has headroom."
+    else
+      sudo rm -f /etc/wattllama/power-limit-above-default
+      sudo rmdir /etc/wattllama 2>/dev/null || true
+    fi
   fi
 fi
 

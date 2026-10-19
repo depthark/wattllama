@@ -239,7 +239,10 @@ package power.)
 Off by default. With `DASH_ALLOW_POWER_LIMIT=1` each NVIDIA card gets a slider:
 
 - only from the PC itself (not from the network), only from WattLlama's own page;
-- only between **60 % of the card's default** and its maximum, inside the range NVIDIA's driver allows;
+- only between **60 % of the card's default** and **the default itself**: it can only lower the limit. Some cards
+  allow more than their default (e.g. 450 W default, 600 W max), but that much more power can trip a weak power
+  supply and switch the PC off, so going above the default needs `DASH_POWER_LIMIT_ABOVE_DEFAULT=1` (Linux:
+  `./install.sh --power-limit-above-default`);
 - the OS asks you every time: a **UAC prompt** on Windows, a **password prompt** (polkit) on Linux;
 - it is a power cap, **not an undervolt**: it cannot make the PC unstable, worst case the card is slower;
 - it **resets on reboot**.
@@ -372,7 +375,7 @@ Everything lives in `.env` (see [.env.example](.env.example)); all settings are 
 | `DASH_REST_W` / `DASH_PSU_EFF` | `35` / `0.88` | the estimated part |
 | `DASH_CPU_MAX_W` | `65` | only used without RAPL counters |
 | `DASH_LHM_URL` | – | LibreHardwareMonitor web server |
-| `DASH_ALLOW_POWER_LIMIT` | `0` | NVIDIA power limit control |
+| `DASH_ALLOW_POWER_LIMIT` / `DASH_POWER_LIMIT_ABOVE_DEFAULT` | `0` / `0` | NVIDIA power limit control / allow above the card's default |
 | `DASH_TOKEN` | – | require a token (set by `-AllowLan`) |
 | `DASH_TASKS` | – | Windows scheduled tasks or Linux systemd timers to show, e.g. `Backup*,MyLLM` |
 | `DASH_PI_DIR` | `~/.pi/agent` | pi agent settings |

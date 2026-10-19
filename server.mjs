@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import { ENGINES } from "./engines/index.mjs";
 import { createAlerts } from "./alerts.mjs";
 import { openDatabase } from "./db.mjs";
+import { powerRange } from "./power.mjs";
 // Everything that differs between Windows and Linux lives in platform/.
 const PLATFORM = await import(process.platform === "win32" ? "./platform/windows.mjs" : "./platform/linux.mjs");
 
@@ -118,7 +119,9 @@ const live = {
 // Lowest power limit WattLlama accepts: 60 % of the card's default, and never below the
 // driver's own minimum. The driver range is already safe (a power cap is not an undervolt:
 // it only slows the card down); the extra margin keeps it from feeling broken.
-const safeFloor = (min, def) => min == null ? null : Math.max(Math.ceil(min), def ? Math.ceil(def * 0.6 / 5) * 5 : 0);
+// Allowed power-limit range per card, see power.mjs: never under 60 % of the default and, unless
+// DASH_POWER_LIMIT_ABOVE_DEFAULT=1, never above the default (a weak PSU could switch the PC off).
+const ABOVE_DEFAULT = process.env.DASH_POWER_LIMIT_ABOVE_DEFAULT === "1";
 
 // nvidia-smi clocks_event_reasons bits: why the GPU is not at full clocks right now.
 const THROTTLE = [[0x4, "power cap"], [0x8, "HW slowdown"], [0x20, "thermal (SW)"], [0x40, "thermal (HW)"],
@@ -142,7 +145,7 @@ stream("nvidia-smi", "nvidia-smi", [
     vramUsed: num(f[4]), vramTotal: num(f[5]), util: num(f[6]), fan: num(f[7]), clockSm: num(f[8]), clockMem: num(f[9]),
     limit: num(f[10]), limitDefault: num(f[11]), limitMin: num(f[12]), limitMax: num(f[13]),
     throttle: throttleText(f[14]), pstate: f[15], pcie: num(f[16]) ? `Gen${f[16]} x${f[17]}` : null, memUtil: num(f[18]),
-    safeMin: safeFloor(num(f[12]), num(f[11])) });
+    ...((r) => ({ safeMin: r?.floor ?? null, safeMax: r?.ceiling ?? null }))(powerRange({ min: num(f[12]), def: num(f[11]), max: num(f[13]) }, ABOVE_DEFAULT)) });
 }, { giveUpOnMissing: true });
 
 PLATFORM.startCpuSampler({ intervalMs: CFG.intervalMs, dir: DIR, stream, num, onSample: ({ pkg, dram, util, mhz, zone, diskR, diskW }) => {
@@ -794,10 +797,10 @@ async function setPowerLimit(req) {
   if (controlBusy) return [409, { error: "A change is already waiting for confirmation." }];
   const body = JSON.parse(await readBody(req));
   const g = live.gpus.get(String(body.gpu));
-  if (!g || g.limitMin == null || g.limitMax == null || g.limitDefault == null) return [400, { error: "Unknown GPU or no power limit support." }];
+  if (!g || g.safeMin == null || g.safeMax == null || g.limitDefault == null) return [400, { error: "Unknown GPU or no power limit support." }];
   const watts = body.reset ? Math.round(g.limitDefault) : Number(body.watts);
-  if (!Number.isInteger(watts) || watts < g.safeMin || watts > Math.floor(g.limitMax)) {
-    return [400, { error: `Limit must be ${g.safeMin}-${Math.floor(g.limitMax)} W.` }];
+  if (!Number.isInteger(watts) || watts < g.safeMin || watts > g.safeMax) {
+    return [400, { error: `Limit must be ${g.safeMin}-${g.safeMax} W${ABOVE_DEFAULT ? "" : " (not above the card's default)"}.` }];
   }
   const index = Number(g.index);
   if (!Number.isInteger(index) || index < 0) return [400, { error: "Bad GPU index." }];

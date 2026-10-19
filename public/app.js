@@ -185,8 +185,8 @@ function renderHardware(L) {
       <div class="row"><span>state · PCIe</span><span>${esc(g.pstate || "–")} · ${esc(g.pcie || "–")}</span></div>
       <div class="row"><span>held back by</span><span>${g.throttle?.length ? esc(g.throttle.join(", ")) : "nothing"}</span></div>`}
       ${g.limitMin != null ? `<div class="pl">
-        <div class="row"><span>power limit</span><span><b id="plv${esc(g.index)}">${pl} W</b> <span class="muted">(${g.safeMin}–${Math.round(g.limitMax)}, default ${Math.round(g.limitDefault)})</span></span></div>
-        ${hwControl ? `<input type="range" min="${g.safeMin}" max="${Math.floor(g.limitMax)}" step="5" value="${pl}" data-gpu="${esc(g.index)}" class="plr">
+        <div class="row"><span>power limit</span><span><b id="plv${esc(g.index)}">${pl} W</b> <span class="muted">(${g.safeMin}–${g.safeMax}, default ${Math.round(g.limitDefault)}${g.safeMax < Math.floor(g.limitMax) ? `; card max ${Math.round(g.limitMax)} needs DASH_POWER_LIMIT_ABOVE_DEFAULT=1` : ""})</span></span></div>
+        ${hwControl ? `<input type="range" min="${g.safeMin}" max="${g.safeMax}" step="5" value="${pl}" data-gpu="${esc(g.index)}" class="plr">
         <div class="hd"><button class="theme" data-apply="${esc(g.index)}">Apply (asks ${L.platform === "linux" ? "password" : "UAC"})</button><button class="theme" data-reset="${esc(g.index)}">Reset to default</button><span class="muted" id="plmsg${esc(g.index)}"></span></div>`
         : `<div class="muted" style="font-size:12px">Control is off. Set DASH_ALLOW_POWER_LIMIT=1 to change it from here.</div>`}
       </div>` : ""}

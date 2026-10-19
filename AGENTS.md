@@ -56,8 +56,8 @@ everything the page asks for goes through `rdb`, which is read-only twice over (
 **Security.** The page is read-only and local.
 - Only GET/HEAD, plus the single POST `/api/gpu/power-limit`, which stays: off by default
   (`DASH_ALLOW_POWER_LIMIT`), loopback only, `Origin` equal to the host plus the `x-wattllama`
-  header and a JSON body (CSRF), integers range-checked against the card's own limits and a 60 %
-  floor, one change at a time, confirmed by the OS (UAC / polkit). Do not add other write endpoints.
+  header and a JSON body (CSRF), integers range-checked by `powerRange()` (power.mjs): 60 % of the
+  default up to the default, above it only with DASH_POWER_LIMIT_ABOVE_DEFAULT=1, one change at a time, confirmed by the OS (UAC / polkit). Do not add other write endpoints.
 - Static files come from the fixed `STATIC` map; no path is ever taken from the URL. SQL table
   names, ranges and periods come from fixed lists; user input is only ever a bound parameter.
 - `hostAllowed()` (DNS rebinding) and `tokenOk()` (`DASH_TOKEN`, constant-time compare) run before
