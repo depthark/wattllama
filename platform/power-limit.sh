@@ -27,7 +27,8 @@ for v in "$def" "$min" "$max"; do
 done
 ceil() { local i=${1%.*} f=${1#*.}; if [ "$1" != "$i" ] && [ "$((10#${f:-0}))" -gt 0 ]; then echo $((i + 1)); else echo "$i"; fi; }
 d=$(ceil "$def") lo=$(ceil "$min") hi=${max%.*}
-floor=$(( (d * 60 + 499) / 500 * 5 ))           # 60 % of the default, rounded up to 5 W
+steps=$(( (d * 60 + 499) / 500 ))               # 60 % of the default in 5 W steps, rounded up
+floor=$(( steps * 5 ))
 [ "$floor" -lt "$lo" ] && floor=$lo
 if [ "$watts" -lt "$floor" ] || [ "$watts" -gt "$hi" ]; then
   echo "limit must be $floor-$hi W" >&2
