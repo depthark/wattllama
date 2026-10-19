@@ -5,15 +5,17 @@
 #
 #   ./install.sh               install / update and start
 #   ./install.sh --rapl        also install the root helper that makes CPU + RAM power measurable
+#   ./install.sh --power-limit let the page set the NVIDIA power limit (a sudoers rule for one helper)
 #   ./install.sh --allow-lan   also serve the page to your phone on the home network (token required)
 #   ./install.sh --no-open     do not open the browser
 set -euo pipefail
 
 DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-RAPL=0 ALLOW_LAN=0 NO_OPEN=0
+RAPL=0 ALLOW_LAN=0 NO_OPEN=0 POWER=0
 for a in "$@"; do
   case "$a" in
     --rapl) RAPL=1 ;;
+    --power-limit) POWER=1 ;;
     --allow-lan) ALLOW_LAN=1 ;;
     --no-open) NO_OPEN=1 ;;
     -h|--help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -66,6 +68,32 @@ if [ "$ALLOW_LAN" -eq 1 ]; then
   command -v firewall-cmd >/dev/null && say "firewalld: allow port $PORT/tcp in your home zone, e.g. sudo firewall-cmd --zone=home --add-port=$PORT/tcp --permanent"
   IP=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')
   say "Open this once on your phone (it remembers the token): http://${IP:-<this-pc>}:$PORT/?token=$(setting DASH_TOKEN)"
+fi
+
+# --- optional: NVIDIA power limit from the page ---
+# A root-owned helper that only sets a power limit in the safe range, and a sudoers rule that
+# lets this user run exactly that file without a password. nvidia-smi must be root-owned too,
+# or a user-writable binary would run as root.
+if [ "$POWER" -eq 1 ]; then
+  NVSMI=$(command -v nvidia-smi || true)
+  NVSMI=${NVSMI:+$(readlink -f "$NVSMI")}
+  if [ -z "$NVSMI" ]; then say "Power limit: no nvidia-smi found; skipping."
+  elif [ "$(stat -c %u "$NVSMI")" != 0 ] || [ -n "$(find "$NVSMI" "$(dirname "$NVSMI")" -maxdepth 0 -perm /022 2>/dev/null)" ]; then
+    say "Power limit: $NVSMI is not owned by root or is writable by others; refusing to run it as root."
+  else
+    say "Power limit: installing the helper and its sudoers rule (asks for sudo)..."
+    tmp=$(mktemp)
+    sed "s|^NVSMI=/usr/bin/nvidia-smi |NVSMI=$NVSMI |" "$DIR/platform/power-limit.sh" > "$tmp"
+    sudo install -D -o root -g root -m 0755 "$tmp" /usr/local/lib/wattllama/power-limit
+    rm -f "$tmp"
+    rule="$(id -un) ALL=(root) NOPASSWD: /usr/local/lib/wattllama/power-limit"
+    printf '%s\n' "$rule" > "$DIR/.sudoers.tmp"
+    if sudo visudo -cf "$DIR/.sudoers.tmp" >/dev/null; then
+      sudo install -o root -g root -m 0440 "$DIR/.sudoers.tmp" /etc/sudoers.d/wattllama-power-limit
+    else say "Power limit: the sudoers rule did not validate; not installed."; fi
+    rm -f "$DIR/.sudoers.tmp"
+    set_setting DASH_ALLOW_POWER_LIMIT 1
+  fi
 fi
 
 # --- optional root helper for CPU + RAM power ---

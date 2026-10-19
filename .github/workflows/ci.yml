@@ -69,7 +69,7 @@ jobs:
       - name: Syntax check
         run: find . -name '*.mjs' -not -path './node_modules/*' -print0 | xargs -0 -n1 node --check
       - name: Shell scripts (shellcheck)
-        run: shellcheck install.sh uninstall.sh start.sh platform/rapl-helper.sh
+        run: shellcheck install.sh uninstall.sh start.sh platform/rapl-helper.sh platform/power-limit.sh
       - name: RAPL helper unit is locked down
         run: systemd-analyze security --offline=yes --threshold=15 platform/wattllama-rapl.service
       - name: Tests

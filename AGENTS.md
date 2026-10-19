@@ -19,6 +19,7 @@ Ollama and LM Studio. One Node.js process, no npm dependencies, served on 127.0.
 | `server.mjs` | Everything server-side in one file, in this order: config (`.env`), child samplers (`stream()`), nvidia-smi, CPU sampler via `platform/`, LibreHardwareMonitor / native sensors, engine polling, the per-minute bucket and SQLite writes, queries (series, heatmap, summary, report, efficiency, share, CSV), setup info (engines, pi, scheduled tasks), HTTP with all security checks, crash handling |
 | `platform/windows.mjs`, `platform/linux.mjs` | All OS differences: CPU / RAM / disk sampling, sensors, OS name, scheduled tasks, the power-limit command. `server.mjs` imports one of them at start |
 | `sampler.ps1`, `tasks.ps1` | Windows helpers: one long-running PowerShell process reading PDH counters (English counter names, so any display language works); Task Scheduler listing on demand |
+| `platform/power-limit.sh` | Optional Linux root helper (`install.sh --power-limit`, one sudoers rule): sets one GPU's power limit, re-checks the range, numbers only |
 | `platform/rapl-helper.sh`, `platform/wattllama-rapl.service` | Optional Linux root helper (`install.sh --rapl`) that publishes coarse RAPL watts in `/run/wattllama/rapl` |
 | `engines/*.mjs` | One adapter per inference engine; `engines/index.mjs` lists them; `engines/common.mjs` has shared helpers (log tail, llama-server log parser, `/slots` poller, argument masking) |
 | `public/` | The page: plain HTML, CSS, JavaScript, no build step. `app.js` polls `/api/*` and draws canvas charts |
@@ -68,8 +69,14 @@ everything the page asks for goes through `rdb`, which is read-only twice over (
   whole on Linux); model ids must not contain folders; pi's `auth.json` and API keys are never read;
   prompts and replies passing through an engine's log stream are matched and dropped, never stored
   or logged. Every value from an engine or a sensor goes through `esc()` before it becomes HTML.
-- Nothing runs as admin or root. The Linux RAPL helper is the only root part and must stay a
-  minimal script under the locked-down unit; CI fails if `systemd-analyze security` exceeds 1.5.
+- Nothing runs as admin or root. The two Linux helpers are the only root parts and must stay
+  minimal: the RAPL helper under its locked-down unit (CI fails if `systemd-analyze security`
+  exceeds 1.5), the power-limit helper behind a sudoers rule for exactly that file, validating its
+  two whole-number arguments and the range itself.
+- Lookup tables keyed by request input are created with `fixed()` (no prototype), so keys like
+  `constructor` or `__proto__` never pass a check. Wrong tokens are rate-limited (lockout).
+- SQLite iterators must not stay open across `await` (Node 22.13 invalidates them when other
+  queries run): read in short pages, as the CSV export does.
 - Nothing is sent anywhere, except alerts to `DASH_ALERT_WEBHOOK` when the user sets one: https (or
   http to a private address), no redirects, 5 s timeout, at most 20 an hour, numbers and model names
   only, Discord mentions disabled. The URL is a secret: `settings()` exposes only its format, logs

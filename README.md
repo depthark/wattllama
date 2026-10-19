@@ -250,10 +250,12 @@ On Linux the NVIDIA driver supports power limits as on Windows (what it does not
 undervolting, which WattLlama never does). Some laptop GPUs have a fixed limit; then no slider is
 shown. Under WSL the limit cannot be changed at all.
 
-> **Linux status:** the request goes through `pkexec`, which needs a polkit agent in your desktop
-> session. It is not yet confirmed on real hardware that this works from the background service; if
-> the page answers "Cancelled in the password prompt", use `sudo nvidia-smi -pl <watts>` meanwhile and
-> tell us in [#5](https://github.com/depthark/wattllama/issues/5).
+**On Linux** run `./install.sh --power-limit` once (asks for sudo). It installs a root-owned helper
+that can do one thing, set a power limit in the safe range (checked again by the helper), and a
+`sudoers` rule that lets your user run exactly that file without a password. Nothing else gains
+root, and `nvidia-smi` is used only if it is root-owned and not writable by others. Without the
+helper, the page falls back to a polkit password prompt, which may not reach a background service.
+Not yet confirmed on real Linux hardware: please report in [#5](https://github.com/depthark/wattllama/issues/5).
 
 ## How it measures
 
@@ -312,11 +314,19 @@ WattLlama does not replace a hardware monitor; it connects the watts to the toke
 
 WattLlama is a read-only monitor that runs as your user.
 
-- Runs as your user, never as admin or root. On Linux the optional RAPL helper is the only root part:
-  a short shell script under a locked-down unit that writes one file of coarse watts.
+- Runs as your user, never as admin or root. On Linux two optional helpers are the only root parts,
+  each a short shell script: the RAPL helper (a locked-down unit that writes one file of coarse
+  watts) and the power-limit helper (one sudoers rule, validates its two numbers itself).
 - Listens on **127.0.0.1** only, unless you choose `-AllowLan` / `--allow-lan` (then a random token is
   required, and `.env` is readable by you only).
 - **No dependencies**: Node.js built-ins and the OS's own tools only, nothing to supply-chain.
+- **Brute force and floods**: 10 wrong tokens lock an address out for 15 minutes; other machines
+  may make at most 600 requests a minute; slow or idle connections are cut (slowloris).
+- **Injection**: SQL is never built from request data (parameters only; table and range names from
+  fixed, prototype-free lists; a CI test fails on any other dynamic SQL); every endpoint is fuzzed
+  with SQL-injection payloads in CI. Log lines are parsed in llama.cpp's exact layout with sane
+  limits, so text inside a prompt cannot fake token counts. Model names and engine output are
+  escaped on the page (checked in a real headless browser), and alerts cannot ping anyone.
 - **GET only**, a fixed list of files (no path ever comes from the URL), strict
   **Content-Security-Policy**, `X-Frame-Options: DENY`, `nosniff`, no CORS.
 - **DNS-rebinding protection**: requests whose `Host` is a foreign domain are refused, so a website

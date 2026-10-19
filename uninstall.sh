@@ -24,6 +24,12 @@ if [ -f /etc/systemd/system/wattllama-rapl.service ] || [ -f /usr/local/lib/watt
   sudo systemctl daemon-reload
 fi
 
+if [ -f /etc/sudoers.d/wattllama-power-limit ] || [ -f /usr/local/lib/wattllama/power-limit ]; then
+  echo "Removing the power-limit helper and its sudoers rule (asks for sudo)..."
+  sudo rm -f /etc/sudoers.d/wattllama-power-limit /usr/local/lib/wattllama/power-limit
+  sudo rmdir /usr/local/lib/wattllama 2>/dev/null || true
+fi
+
 if command -v ufw >/dev/null && sudo ufw status 2>/dev/null | grep -q WattLlama; then
   while n=$(sudo ufw status numbered | grep WattLlama | head -n1 | sed -n 's/^\[ *\([0-9]*\)\].*/\1/p') && [ -n "$n" ]; do
     yes | sudo ufw delete "$n" >/dev/null

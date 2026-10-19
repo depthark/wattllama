@@ -234,9 +234,14 @@ export async function scheduledTasks(patterns, { run$ }) {
 
 // ---------- NVIDIA power limit ----------
 
-// pkexec asks for the password in a polkit dialog (the desktop's UAC); index and watts are
+// With install.sh --power-limit: sudo runs the root-owned helper, which a sudoers rule allows
+// without a password and which checks the range again. Without it: pkexec asks for the
+// password in a polkit dialog (may not reach a background service). index and watts are
 // validated integers, passed as separate arguments (no shell).
+export const POWER_HELPER = "/usr/local/lib/wattllama/power-limit";
+export const POWER_SUDOERS = "/etc/sudoers.d/wattllama-power-limit";
 export function powerLimitCommand(index, watts) {
+  if (fs.existsSync(POWER_HELPER) && fs.existsSync(POWER_SUDOERS)) return ["sudo", ["-n", POWER_HELPER, String(index), String(watts)]];
   return ["pkexec", ["nvidia-smi", "-i", String(index), "-pl", String(watts)]];
 }
-export const elevation = "the password prompt";
+export const elevation = "the password prompt (or install.sh --power-limit is missing)";
