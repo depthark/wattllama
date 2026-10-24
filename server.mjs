@@ -20,6 +20,7 @@ import { ENGINES } from "./engines/index.mjs";
 import { createAlerts } from "./alerts.mjs";
 import { openDatabase } from "./db.mjs";
 import { powerRange } from "./power.mjs";
+import { aboveIdle, per1k, splitEnergy } from "./energy.mjs";
 // Everything that differs between Windows and Linux lives in platform/.
 const PLATFORM = await import(process.platform === "win32" ? "./platform/windows.mjs" : "./platform/linux.mjs");
 
@@ -521,10 +522,18 @@ function period(from, to = Date.now() + 60_000) {
     FROM m WHERE ts >= ? AND ts < ?`).get(from, to);
 }
 
-// Per model: tokens, busy time and whole-PC energy while it was busy.
-function perModel(from, to = Date.now() + 60_000) {
+// Per model: tokens, busy time and whole-PC energy while it was busy, plus the energy above
+// the idle baseline (null while that is still unknown).
+function perModel(from, to = Date.now() + 60_000, idleW = null) {
   return rdb.prepare(`SELECT model, SUM(active_s) act, SUM(wh) wh, SUM(gen_tok) gen, SUM(pp_tok) pp, SUM(req) req
-    FROM mm WHERE ts >= ? AND ts < ? GROUP BY model ORDER BY SUM(active_s) DESC`).all(from, to);
+    FROM mm WHERE ts >= ? AND ts < ? GROUP BY model ORDER BY SUM(active_s) DESC`).all(from, to)
+    .map((r) => { const whIdle = aboveIdle(r.wh, r.act, idleW); return { ...r, wh_idle: whIdle, inc_wh_per_1k: per1k(whIdle, r.gen) }; });
+}
+
+// Per model: time spent in prefill and in generation, from the logged requests.
+function requestTimes(from, to = Date.now() + 60_000) {
+  return new Map(rdb.prepare(`SELECT model, COALESCE(SUM(pp_ms), 0) pp_ms, COALESCE(SUM(gen_ms), 0) gen_ms
+    FROM requests WHERE ts >= ? AND ts < ? GROUP BY model`).all(from, to).map((r) => [r.model, r]));
 }
 
 // Report: one row per local day plus per-model totals, for a fixed list of periods.
@@ -545,11 +554,17 @@ function reportRange(p) {
 function report(p) {
   if (!REPORT_PERIODS.includes(p)) p = "this-month";
   const [from, to] = reportRange(p);
+  const idleW = idleBaseline();
   const days = rdb.prepare(`SELECT date(ts / 1000, 'unixepoch', 'localtime') day, SUM(secs) secs, SUM(wh) wh, SUM(wh_active) wha,
       SUM(active_s) act, SUM(gen_tok) gen, SUM(pp_tok) pp, MAX(gpu_tmax) gpu_tmax, MAX(cpu_tmax) cpu_tmax
     FROM m WHERE ts >= ? AND ts < ? GROUP BY day ORDER BY day`).all(from, to);
+  const times = requestTimes(from, to);
+  const models = perModel(from, to, idleW).map((m) => {
+    const t = times.get(m.model), split = t && splitEnergy(m.wh, t.pp_ms, t.gen_ms, m.pp, m.gen);
+    return { ...m, pp_wh_per_1k: split?.ppPer1k ?? null, gen_wh_per_1k: split?.genPer1k ?? null };
+  });
   return { period: p, from, to: Math.min(to, Date.now()), price: CFG.price, currency: CFG.currency,
-    total: period(from, to), days, models: perModel(from, to) };
+    total: period(from, to), days, models, idleW };
 }
 
 function reportCSV(res, sendHeaders, p) {
@@ -564,9 +579,9 @@ function reportCSV(res, sendHeaders, p) {
   const t = r.total;
   lines.push(["total", (t.secs / 3600).toFixed(2), (t.wh / 1000).toFixed(3), (t.wha / 1000).toFixed(3), (t.act / 3600).toFixed(2), t.gen, t.pp, "", "",
     ...(CFG.price ? [cost(t.wh), cost(t.wha)] : [])].join(","));
-  lines.push("", `model,requests,generated tokens,prompt tokens,busy (h),energy while busy (kWh),Wh per 1k tokens${CFG.price ? `,cost${cur}` : ""}`);
+  lines.push("", `model,requests,generated tokens,prompt tokens,busy (h),energy while busy (kWh),Wh per 1k tokens,energy above idle (kWh),Wh above idle per 1k tokens,Wh prefill per 1k prompt tokens,Wh generation per 1k generated tokens${CFG.price ? `,cost${cur}` : ""}`);
   for (const m of r.models) lines.push([q(m.model), m.req, m.gen, m.pp, (m.act / 3600).toFixed(2), (m.wh / 1000).toFixed(3),
-    m.gen ? (m.wh / (m.gen / 1000)).toFixed(2) : "", ...(CFG.price ? [cost(m.wh)] : [])].join(","));
+    m.gen ? (m.wh / (m.gen / 1000)).toFixed(2) : "", m.wh_idle != null ? (m.wh_idle / 1000).toFixed(3) : "", ...[m.inc_wh_per_1k, m.pp_wh_per_1k, m.gen_wh_per_1k].map((v) => v != null ? v.toFixed(2) : ""), ...(CFG.price ? [cost(m.wh)] : [])].join(","));
   if (CFG.price) lines.push("", `price per kWh,${CFG.price},${q(CFG.currency)}`);
   sendHeaders({ "content-type": "text/csv; charset=utf-8", "content-disposition": `attachment; filename="wattllama-report-${r.period}.csv"` });
   res.end("﻿" + lines.join("\r\n") + "\r\n");      // BOM + CRLF: Excel opens it with the right characters
@@ -575,9 +590,11 @@ function reportCSV(res, sendHeaders, p) {
 function summary() {
   const d = new Date(); d.setHours(0, 0, 0, 0);
   const today = d.getTime();
+  const idleW = idleBaseline();
   return {
-    models: { today: perModel(today), week: perModel(Date.now() - 7 * 86400_000), all: perModel(0) },
-    restW: CFG.restW, psuEff: CFG.psuEff, idleW: idleBaseline(), price: CFG.price, currency: CFG.currency,
+    models: { today: perModel(today, undefined, idleW), week: perModel(Date.now() - 7 * 86400_000, undefined, idleW),
+      all: perModel(0, undefined, idleW) },
+    restW: CFG.restW, psuEff: CFG.psuEff, idleW, price: CFG.price, currency: CFG.currency,
     first: rdb.prepare("SELECT MIN(ts) t FROM m").get().t,
     today: period(today), yesterday: period(today - 86400_000, today),
     week: period(Date.now() - 7 * 86400_000),
@@ -682,14 +699,18 @@ const VERSION = readJSON(path.join(DIR, "package.json"))?.version || "dev";
 const engineOf = new Map();          // model -> engine name, learnt while it is loaded
 function share() {
   for (const m of live.llm.models || []) engineOf.set(m.id, m.engine);
+  const idleW = idleBaseline();
   const gpus = [...live.gpus.values(), ...live.lhmGpus].map((g) => g.name);
   const models = rdb.prepare(`SELECT mm.model, SUM(mm.gen_tok) gen, SUM(mm.active_s) act, SUM(mm.wh) wh,
       SUM(m.gpu_pl * mm.active_s) / NULLIF(SUM(CASE WHEN m.gpu_pl IS NULL THEN 0 ELSE mm.active_s END), 0) pl
     FROM mm LEFT JOIN m ON m.ts = mm.ts WHERE mm.gen_tok > 0 GROUP BY mm.model HAVING SUM(mm.gen_tok) >= 1000 ORDER BY gen DESC`).all()
-    .map((r) => ({ model: r.model, engine: engineOf.get(r.model) || "",
-      quant: r.model.match(/(?:^|[-_.:])((?:UD-)?(?:IQ\d_[A-Z0-9_]+|Q\d(?:_[A-Z0-9]+)*|F16|BF16|FP16|MXFP4|\d-?bit))(?=$|[-_.:])/i)?.[1] || "",
-      tokens: r.gen, tokPerS: r.act > 0 ? r.gen / r.act : null, whPer1k: r.wh / (r.gen / 1000),
-      powerLimit: r.pl ? Math.round(r.pl) : null }));
+    .map((r) => {
+      return { model: r.model, engine: engineOf.get(r.model) || "",
+        quant: r.model.match(/(?:^|[-_.:])((?:UD-)?(?:IQ\d_[A-Z0-9_]+|Q\d(?:_[A-Z0-9]+)*|F16|BF16|FP16|MXFP4|\d-?bit))(?=$|[-_.:])/i)?.[1] || "",
+        tokens: r.gen, tokPerS: r.act > 0 ? r.gen / r.act : null, whPer1k: r.wh / (r.gen / 1000),
+        whPer1kAboveIdle: per1k(aboveIdle(r.wh, r.act, idleW), r.gen),
+        powerLimit: r.pl ? Math.round(r.pl) : null };
+    });
   return { version: VERSION, os: PLATFORM.osName(), cpu: os.cpus()[0]?.model.trim().replace(/\s+/g, " ") || "",
     ramGB: Math.round(os.totalmem() / 1073741824), gpus, psuEff: CFG.psuEff, restW: CFG.restW, models };
 }
@@ -741,9 +762,11 @@ function requests(model, range) {
 }
 
 function runs(limit = 40) {
+  const idleW = idleBaseline();
   const rows = rdb.prepare("SELECT * FROM runs ORDER BY start DESC LIMIT ?").all(limit);
   for (const [model, r] of openRuns) rows.unshift({ start: r.start, end: r.last, model, active_s: r.active,
     wh: r.wh, gen_tok: r.gen, pp_tok: r.pp, req: r.req, open: true });
+  for (const r of rows) r.inc_wh_per_1k = per1k(aboveIdle(r.wh, r.active_s, idleW), r.gen_tok);
   return rows;
 }
 

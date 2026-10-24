@@ -96,6 +96,8 @@ Many engines embed llama.cpp, so those often do most of the work.
 
 ## Pull requests
 
+Add a line for your change under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md).
+
 - One topic per PR, with a test when it changes behaviour.
 - `node --test tests/*.test.mjs` passes, and you tried it in a browser (light and dark theme).
 - Commits are small and say why. No force-pushes to `main`.

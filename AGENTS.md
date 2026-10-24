@@ -128,3 +128,6 @@ node server.mjs --demo              # 14 days of sample history in memory, http:
 - UI text in English. Units: W, Wh / kWh; money only when the user sets a price.
 - Small commits that explain why; no force-push or history rewriting on `main`.
 - A user-visible change updates the README (and `.env.example` for settings) in the same commit.
+- A user-visible change also adds a line under `## [Unreleased]` in `CHANGELOG.md`. A release
+  moves those lines under a new `## [x.y.z] - date` heading, bumps `package.json`, tags `vx.y.z`
+  and uses the same text for the GitHub release notes (plus upgrade steps).

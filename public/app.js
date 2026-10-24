@@ -88,11 +88,12 @@ function drawRuns() {
   $("runsMore").hidden = runsData.length <= 10;
   $("runsMore").textContent = runsAll ? "Show fewer" : `Show all ${runsData.length}`;
   $("runs").innerHTML = R.length
-    ? `<tr><th>start</th><th>model</th><th class="n">busy</th><th class="n">requests</th><th class="n">tokens</th><th class="n">prefill</th><th class="n">tok/s</th><th class="n">energy</th>${PRICE ? '<th class="n">cost</th>' : ""}<th class="n">Wh / 1k tok</th></tr>`
+    ? `<tr><th>start</th><th>model</th><th class="n">busy</th><th class="n">requests</th><th class="n">tokens</th><th class="n">prefill</th><th class="n">tok/s</th><th class="n">energy</th>${PRICE ? '<th class="n">cost</th>' : ""}<th class="n">Wh / 1k tok</th><th class="n">Wh / 1k above idle</th></tr>`
       + R.map((r) => `<tr><td>${r.open ? '<span class="dot run"></span>' : ""}${when(r.start)}</td><td>${esc(r.model || "–")}</td>
         <td class="n">${dur(r.active_s)}</td><td class="n">${nf(r.req || 0)}</td><td class="n">${nf(r.gen_tok)}</td><td class="n">${nf(r.pp_tok)}</td>
         <td class="n">${r.active_s > 0 && r.gen_tok ? (r.gen_tok / r.active_s).toFixed(1) : "–"}</td>
-        <td class="n">${energy(r.wh)}</td>${PRICE ? `<td class="n">${money(r.wh)}</td>` : ""}<td class="n">${r.gen_tok ? (r.wh / (r.gen_tok / 1000)).toFixed(2) : "–"}</td></tr>`).join("")
+        <td class="n">${energy(r.wh)}</td>${PRICE ? `<td class="n">${money(r.wh)}</td>` : ""}<td class="n">${r.gen_tok ? (r.wh / (r.gen_tok / 1000)).toFixed(2) : "–"}</td>
+        <td class="n">${r.inc_wh_per_1k != null ? r.inc_wh_per_1k.toFixed(2) : S.idleW == null ? "learning…" : "–"}</td></tr>`).join("")
     : `<tr><td class="muted">No runs yet. A run is recorded each time a model works.</td></tr>`;
 }
 $("runsMore").addEventListener("click", () => { runsAll = !runsAll; drawRuns(); });
@@ -116,7 +117,9 @@ function renderModels() {
     const rows = t || a ? `
       <div class="row"><span>today</span><span>${nf(t?.req || 0)} req · ${t?.gen ? nf(t.gen) + " tok out · " : ""}${nf(t?.pp || 0)} tok in · ${dur(t?.act || 0)} busy</span></div>
       <div class="row"><span>energy while busy today</span><span>${withCost(t?.wh || 0)}</span></div>
-      <div class="row"><span>all time</span><span>${nf(a?.req || 0)} req · ${a?.gen ? `${nf(a.gen)} tok · ${energy(a.wh / (a.gen / 1000))} / 1k tok` : `${dur(a?.act || 0)} busy · ${a?.req ? energy(a.wh / a.req) + " / req" : "–"}`}</span></div>` : "";
+      <div class="row"><span>energy above idle today</span><span>${t?.wh_idle != null ? energy(t.wh_idle) : S.idleW == null ? "learning idle power…" : "–"}</span></div>
+      <div class="row"><span>all time</span><span>${nf(a?.req || 0)} req · ${a?.gen ? `${nf(a.gen)} tok · ${energy(a.wh / (a.gen / 1000))} / 1k tok` : `${dur(a?.act || 0)} busy · ${a?.req ? energy(a.wh / a.req) + " / req" : "–"}`}</span></div>
+      <div class="row"><span>energy above idle</span><span>${a?.wh_idle != null ? energy(a.wh_idle) : S.idleW == null ? "learning idle power…" : "–"}</span></div>` : "";
     return `<div class="card"><h3><span class="dot ${st[0]}"></span>${esc(st[1])}${m.kind && m.kind !== "text" ? ` · ${esc(m.kind)}` : ""}<span class="eng">${esc(m.engine)}</span></h3>
       <div style="font-weight:600;margin-bottom:4px;word-break:break-all">${esc(m.id)}</div>
       <div class="muted" style="font-size:12px;margin-bottom:8px">${[m.paramsText ? `${esc(m.paramsText)} params` : bn(m.params), gb(m.size), m.ctxTrain ? `trained ctx ${nf(m.ctxTrain)}` : ""].filter(Boolean).join(" · ")}</div>
@@ -391,9 +394,12 @@ async function refreshReport() {
       + `<tr><th>total</th><th class="n">${dur(t.secs)}</th><th class="n">${energy(t.wh)}</th><th class="n">${energy(t.wha)}</th><th class="n">${dur(t.act)}</th><th class="n">${nf(t.gen)}</th><th></th>${PRICE ? `<th class="n">${money(t.wh)}</th>` : ""}</tr>`
     : `<tr><td class="muted">No data in this period.</td></tr>`;
   $("reportModels").innerHTML = R.models.length
-    ? `<tr><th>model</th><th class="n">requests</th><th class="n">tokens out</th><th class="n">tokens in</th><th class="n">busy</th><th class="n">energy while busy</th><th class="n">Wh / 1k tok</th>${PRICE ? '<th class="n">cost</th>' : ""}</tr>`
+    ? `<tr><th>model</th><th class="n">requests</th><th class="n">tokens out</th><th class="n">tokens in</th><th class="n">busy</th><th class="n">energy while busy</th><th class="n">Wh / 1k tok</th><th class="n">Wh / 1k above idle</th><th class="n">Wh prefill / 1k prompt</th><th class="n">Wh gen / 1k gen tok</th>${PRICE ? '<th class="n">cost</th>' : ""}</tr>`
       + R.models.map((m) => `<tr><td>${esc(short(m.model))}</td><td class="n">${nf(m.req || 0)}</td><td class="n">${nf(m.gen)}</td><td class="n">${nf(m.pp)}</td><td class="n">${dur(m.act)}</td>
-        <td class="n">${energy(m.wh)}</td><td class="n">${m.gen ? (m.wh / (m.gen / 1000)).toFixed(2) : "–"}</td>${PRICE ? `<td class="n">${money(m.wh)}</td>` : ""}</tr>`).join("")
+        <td class="n">${energy(m.wh)}</td><td class="n">${m.gen ? (m.wh / (m.gen / 1000)).toFixed(2) : "–"}</td>
+        <td class="n">${m.inc_wh_per_1k != null ? m.inc_wh_per_1k.toFixed(2) : R.idleW == null ? "learning…" : "–"}</td>
+        <td class="n">${m.pp_wh_per_1k != null ? m.pp_wh_per_1k.toFixed(2) : "–"}</td>
+        <td class="n">${m.gen_wh_per_1k != null ? m.gen_wh_per_1k.toFixed(2) : "–"}</td>${PRICE ? `<td class="n">${money(m.wh)}</td>` : ""}</tr>`).join("")
     : `<tr><td class="muted">No model activity in this period.</td></tr>`;
   $("reportNote").textContent = $("foot").textContent;
 }

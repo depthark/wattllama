@@ -300,7 +300,7 @@ Tools that also connect energy and tokens (checked against their own documentati
 
 | | Energy per token | Counts | History | Engines | Platforms | Setup |
 |---|---|---|---|---|---|---|
-| **WattLlama** | ✅ Wh / 1k tokens, per model and run | **whole PC**: GPU + CPU + RAM measured, rest estimated | ✅ minutes, reports, heatmap | llama.cpp, Ollama, LM Studio | Windows, Linux | one script, no dependencies |
+| **WattLlama** | ✅ Wh / 1k tokens, above-idle, prefill↔generation split | **whole PC**: GPU + CPU + RAM measured, rest estimated | ✅ minutes, reports, heatmap | llama.cpp, Ollama, LM Studio | Windows, Linux | one script, no dependencies |
 | [InferenceInquire](https://github.com/nisesen/llamacpp-dashboard) | ✅ Wh / 1k tokens, cost | GPU | ✅ 2 years, alerts | llama.cpp | agent on Linux (NVIDIA); dashboard in Docker anywhere | Docker Compose |
 | [llmtop](https://github.com/ProgrammerPeasant/llmtop) | ✅ J / token, API-cost equivalent | GPU (NVML) | session | Ollama (llama.cpp planned) | Linux, Windows | `cargo install`, a proxy in front of Ollama |
 | [otop](https://github.com/TiniLLM/ollama-token-monitor) | ❌ tok/s only | – | ❌ | Ollama | macOS (Apple GPU); Linux without GPU panel | Python, a proxy in front of Ollama |
@@ -312,6 +312,15 @@ GPU (with CPU-offloaded MoE experts, the CPU is a big part of the bill), follows
 once, needs no Docker or proxy, and runs on Windows without admin rights.
 
 WattLlama does not replace a hardware monitor; it connects the watts to the tokens.
+
+**Above idle.** Wh / 1k tokens counts the whole PC while a model works, including what it
+would draw anyway. *Wh / 1k above idle* first subtracts the idle baseline (the 20th percentile of
+whole minutes without generation in the last 7 days), so it shows what the model added. The
+current baseline is used for every period, so an old period is only as right as today's idle.
+
+**Prefill and generation.** The report splits a model's energy by the time its logged requests
+spent reading the prompt and generating, and divides by prompt and generated tokens. It is an
+estimate: both phases are assumed to draw the same power. Models without request timings show –.
 
 ## Security
 
