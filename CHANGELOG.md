@@ -6,6 +6,12 @@ each release also has notes with upgrade steps on the
 
 ## [Unreleased]
 
+### Fixed
+- llama.cpp router: a model unloaded on purpose (for example to free the GPU for another
+  program) was loaded straight back when WattLlama's poll had listed it as loaded a moment
+  earlier. Per-model requests now send `autoload=false`, so the router never loads a model
+  because WattLlama asked about it.
+
 ## [0.5.0] - 2026-10-24
 
 Asked for on X: does energy per token subtract idle power, and are prefill and generation

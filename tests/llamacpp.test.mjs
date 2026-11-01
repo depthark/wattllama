@@ -5,6 +5,7 @@ import { mockServer, tempFile, tokenSink } from "./helpers.mjs";
 
 test("router: per-model tokens from the log, only loaded models polled", async () => {
   let slotsAsked = [];
+  const autoloadOff = [];
   let busy = true;
   const srv = await mockServer({
     "/models": { data: [
@@ -12,7 +13,7 @@ test("router: per-model tokens from the log, only loaded models polled", async (
       { id: "cls", status: { value: "loaded", args: ["--port", "61447"] }, architecture: { output_modalities: ["decisions"] } },
       { id: "big", status: { value: "unloaded" } },
     ] },
-    "/slots": (req, u) => { slotsAsked.push(u.searchParams.get("model")); return [{ id: 0, id_task: 1, is_processing: busy && u.searchParams.get("model") === "chat", next_token: [{ n_decoded: 5 }] }]; },
+    "/slots": (req, u) => { slotsAsked.push(u.searchParams.get("model")); autoloadOff.push(u.searchParams.get("autoload") === "false"); return [{ id: 0, id_task: 1, is_processing: busy && u.searchParams.get("model") === "chat", next_token: [{ n_decoded: 5 }] }]; },
   });
   const log = tempFile("router.log");
   const sink = tokenSink();
@@ -35,6 +36,7 @@ test("router: per-model tokens from the log, only loaded models polled", async (
     assert.deepEqual(sink.got.get("cls"), { gen: 0, pp: 127, req: 1 });
     assert.deepEqual(reqs.map((r) => [r.model, r.pp, r.gen, r.ctx]), [["cls", 127, undefined, 127], ["chat", 19, 150, 169]], "one record per request, per model");
     assert.ok(!slotsAsked.includes("big"), "an unloaded model must never be asked (the router would load it)");
+    assert.ok(autoloadOff.length && autoloadOff.every(Boolean), "every per-model request says autoload=false (a model unloaded mid-poll stays unloaded)");
     assert.deepEqual(r.models.map((m) => [m.id, m.processing, m.kind]), [["chat", true, "text"], ["cls", false, "decisions"]]);
 
     const s = await e.setup();

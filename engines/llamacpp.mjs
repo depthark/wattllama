@@ -6,7 +6,8 @@
 //   2. /metrics (server started with --metrics); exact
 //   3. /slots; approximate, the last moments of each reply are missed
 // In router mode only models that are already loaded are asked, because
-// /slots?model=X on an unloaded model would make the router load it.
+// /slots?model=X on an unloaded model would make the router load it. autoload=false
+// covers the race: a model unloaded between /models and its /slots is left unloaded.
 
 import { getJSON, tail, parseLlamaLine, slotPoller, requestAssembler, rate, argPairs, baseName } from "./common.mjs";
 
@@ -45,7 +46,7 @@ export function create({ env, addTokens, addRequest = () => {} }) {
       const i = a.indexOf("--port");
       if (i >= 0) portModel.set(String(a[i + 1]), m.id);
     }
-    return loaded.map((m) => ({ id: m.id, q: `?model=${encodeURIComponent(m.id)}` }));
+    return loaded.map((m) => ({ id: m.id, q: `?model=${encodeURIComponent(m.id)}&autoload=false` }));
   }
 
   function consumeLog() {
